@@ -47,3 +47,15 @@ FILTER_OPTIONS = [
     ("🎯 Same Major / Year", "filter_major"),
 ]
 
+# Optional Telegram Sticker File IDs (from Telegram animated sticker packs)
+# Users can set file_ids directly or send stickers to the bot to get their file_id
+STICKER_IDS = {
+    "welcome": os.getenv("STICKER_WELCOME", ""),
+    "search": os.getenv("STICKER_SEARCH", ""),
+    "match_found": os.getenv("STICKER_MATCH", ""),
+    "chat_start": os.getenv("STICKER_CHAT", ""),
+    "loading": os.getenv("STICKER_LOADING", ""),
+    "bored_waiting": os.getenv("STICKER_BORED", ""),
+}
+
+

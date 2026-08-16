@@ -17,6 +17,7 @@ Features:
 
 import os
 import sys
+import gzip
 import logging
 import asyncio
 import random
@@ -56,7 +57,8 @@ from config import (
     INTERESTS_LIST,
     YEAR_OPTIONS,
     GENDER_OPTIONS,
-    FILTER_OPTIONS
+    FILTER_OPTIONS,
+    STICKER_IDS
 )
 from database import DatabaseManager
 
@@ -165,15 +167,24 @@ def format_profile_card(student: dict, is_self: bool = False) -> str:
 
 async def send_asset_animation(chat_id: int, animation_key: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
-    Checks the /assets folder for a matching animation (TGS / Lottie, GIF, MP4) and sends it
-    as an animated sticker or looping animation.
-    Supported file extensions: .tgs (Telegram animated sticker), .gif, .mp4, .webp
+    Checks for configured sticker file_ids or /assets animations (TGS, GIF, MP4) and sends it.
+    Validates .tgs file format to avoid sending corrupted files as unknown documents.
     """
+    # 1. Check if a Telegram Sticker File ID is configured in STICKER_IDS
+    sticker_id = STICKER_IDS.get(animation_key, "").strip()
+    if sticker_id:
+        try:
+            await context.bot.send_sticker(chat_id=chat_id, sticker=sticker_id)
+            return True
+        except Exception as e:
+            logger.warning(f"Could not send sticker by file_id for {animation_key}: {e}")
+
+    # 2. Check local assets directory
     assets_dir = os.path.join(os.path.dirname(__file__), "assets")
     if not os.path.exists(assets_dir):
         return False
 
-    extensions = [".tgs", ".gif", ".mp4", ".webp", ".png"]
+    extensions = [".gif", ".mp4", ".tgs", ".webp", ".png"]
     for ext in extensions:
         filename = f"{animation_key}{ext}"
         candidate_path = os.path.join(assets_dir, filename)
@@ -183,7 +194,18 @@ async def send_asset_animation(chat_id: int, animation_key: str, context: Contex
                     file_bytes = f.read()
 
                 if ext == ".tgs":
-                    # InputFile with explicit filename ensures Telegram Bot API sets application/x-tgsticker
+                    # Validate that the file is a valid GZIP compressed Lottie stream
+                    # If corrupted by text uploads (containing Unicode replacement characters), skip to avoid Telegram sending .unknown document
+                    try:
+                        gzip.decompress(file_bytes)
+                    except Exception as gz_err:
+                        logger.warning(
+                            f"Asset {filename} is not a valid gzip file ({gz_err}). "
+                            f"Skipping to prevent Telegram sending an unknown document. "
+                            f"Use a valid .tgs, .gif, .mp4, or Telegram Sticker File ID."
+                        )
+                        continue
+
                     input_file = InputFile(file_bytes, filename=f"{animation_key}.tgs")
                     await context.bot.send_sticker(chat_id=chat_id, sticker=input_file)
                 elif ext in [".gif", ".mp4"]:
@@ -197,6 +219,7 @@ async def send_asset_animation(chat_id: int, animation_key: str, context: Contex
                 logger.warning(f"Could not send animation asset {candidate_path}: {e}")
                 return False
     return False
+
 
 
 # ---------------------------------------------------------------------------
