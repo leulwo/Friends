@@ -80,6 +80,7 @@ db = DatabaseManager(DATABASE_URL)
 # ---------------------------------------------------------------------------
 (
     STATE_NAME,
+    STATE_AGE,
     STATE_GENDER,
     STATE_MAJOR,
     STATE_YEAR,
@@ -87,7 +88,7 @@ db = DatabaseManager(DATABASE_URL)
     STATE_INTERESTS,
     STATE_BIO,
     STATE_PHOTO
-) = range(8)
+) = range(9)
 
 # ---------------------------------------------------------------------------
 # IN-MEMORY ACTIVE STATE
@@ -185,6 +186,7 @@ def format_profile_card(student: dict, is_self: bool = False) -> str:
     """Format student details into an attractive profile card."""
     name = student.get("full_name") or student.get("name") or "Campus Student"
     gender = student.get("gender") or "Not specified"
+    age = student.get("age") or "Not specified"
     major = student.get("major") or "Undeclared"
     year = student.get("study_year") or student.get("year") or "Undergraduate"
     dorm = student.get("dorm") or "Campus"
@@ -204,6 +206,7 @@ def format_profile_card(student: dict, is_self: bool = False) -> str:
         f"{header}\n\n"
         f"<b>Name:</b> {name}\n"
         f"<b>Gender:</b> {gender}\n"
+        f"<b>Age:</b> {age}\n"
         f"<b>Major:</b> {major} ({year})\n"
         f"<b>Campus / Area:</b> {dorm}\n"
         f"<b>Interests:</b> {interests}\n"
@@ -311,13 +314,15 @@ async def search_and_display_candidate(user_id: int, context: ContextTypes.DEFAU
     exclude_ids = seen.union(user_blocks).union({user_id})
 
     # Fetch candidates matching filter
-    candidates = await db.find_candidates(user_id, gender_filter=gender_filter, exclude_ids=exclude_ids)
+    current_user = await db.get_user(user_id)
+    candidates = await db.find_candidates(user_id, gender_filter=gender_filter, exclude_ids=exclude_ids, current_user_profile=current_user)
 
     # If all candidates seen, reset session cache to allow cycling through again
     if not candidates and len(seen) > 0:
         viewed_candidates[user_id] = set()
         exclude_ids = user_blocks.union({user_id})
-        candidates = await db.find_candidates(user_id, gender_filter=gender_filter, exclude_ids=exclude_ids)
+        current_user = await db.get_user(user_id)
+    candidates = await db.find_candidates(user_id, gender_filter=gender_filter, exclude_ids=exclude_ids, current_user_profile=current_user)
 
     if not candidates:
         filter_label = "Female" if filter_code == "filter_female" else ("Male" if filter_code == "filter_male" else "any")
@@ -464,6 +469,7 @@ async def disconnect_chat(user_id: int, context: ContextTypes.DEFAULT_TYPE, noti
 # COMMAND HANDLERS
 # ---------------------------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db.update_activity(update.effective_user.id)
     """Handle /start command. Onboarding check."""
     user = update.effective_user
     db_user = await db.get_user(user.id)
@@ -634,6 +640,7 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MESSAGE RELAY (1-ON-1 CHAT BRIDGE & MEDIA SUPPORT)
 # ---------------------------------------------------------------------------
 async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db.update_activity(update.effective_user.id)
     """Relays text, images, videos, voice notes, stickers, and documents between matched pairs."""
     user_id = update.effective_user.id
     text = update.message.text if update.message else ""
@@ -725,106 +732,179 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
-# ONBOARDING CONVERSATION FLOW (NAME -> GENDER -> MAJOR -> YEAR -> DORM -> HOBBIES -> HANDLE)
+# ONBOARDING CONVERSATION FLOW (NAME -> GENDER -> MAJOR -> YEAR -> DORM -> HOBBIES -> BIO -> PHOTO)
 # ---------------------------------------------------------------------------
-async def start_onboarding_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def start_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"] = {}
-    await query.edit_message_text("<b>Step 1/8:</b> What is your <b>First Name</b> or Nickname on campus?", parse_mode="HTML")
+    text = "<b>Step 1/9:</b> What is your <b>First Name</b> or Nickname on campus?"
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text, parse_mode="HTML")
+    else:
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
     return STATE_NAME
 
+async def back_to_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "<b>Step 1/9:</b> What is your <b>First Name</b> or Nickname on campus?", 
+        parse_mode="HTML", 
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return STATE_NAME
 
 async def onboarding_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["name"] = update.message.text.strip()
-    
-    keyboard = [[KeyboardButton(g)] for g in GENDER_OPTIONS]
     await update.message.reply_text(
-        "<b>Step 2/8:</b> What is your <b>Gender</b>? (Used for match filtering)",
+        "<b>Step 2/9:</b> What is your <b>Age</b>?",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back")]], resize_keyboard=True)
+    )
+    return STATE_AGE
+
+
+async def back_to_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "<b>Step 2/9:</b> What is your <b>Age</b>?", 
+        parse_mode="HTML", 
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back")]], resize_keyboard=True)
+    )
+    return STATE_AGE
+
+async def onboarding_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["onboarding"]["age"] = update.message.text.strip()
+    keyboard = [[KeyboardButton(g)] for g in GENDER_OPTIONS]
+    keyboard.append([KeyboardButton("⬅️ Back")])
+    await update.message.reply_text(
+        "<b>Step 3/9:</b> What is your <b>Gender</b>? (Used for match filtering)",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
     return STATE_GENDER
 
+async def back_to_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[KeyboardButton(g)] for g in GENDER_OPTIONS]
+    keyboard.append([KeyboardButton("⬅️ Back")])
+    await update.message.reply_text(
+        "<b>Step 2/9:</b> What is your <b>Gender</b>? (Used for match filtering)",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    )
+    return STATE_GENDER
 
 async def onboarding_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["gender"] = update.message.text.strip()
     await update.message.reply_text(
-        "<b>Step 3/8:</b> What is your <b>Major / Department</b>? (e.g. Computer Science, Business, Biology, Medicine)",
+        "<b>Step 3/9:</b> What is your <b>Major / Department</b>? (e.g. Computer Science, Business, Biology, Medicine)",
         parse_mode="HTML",
-        reply_markup=ReplyKeyboardRemove()
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back")]], resize_keyboard=True)
     )
     return STATE_MAJOR
 
+async def back_to_major(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "<b>Step 3/9:</b> What is your <b>Major / Department</b>? (e.g. Computer Science, Business, Biology, Medicine)",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back")]], resize_keyboard=True)
+    )
+    return STATE_MAJOR
 
 async def onboarding_major(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["major"] = update.message.text.strip()
-    
     keyboard = [[KeyboardButton(y)] for y in YEAR_OPTIONS]
+    keyboard.append([KeyboardButton("⬅️ Back")])
     await update.message.reply_text(
-        "<b>Step 4/8:</b> What is your <b>Academic Year</b>?",
+        "<b>Step 4/9:</b> What is your <b>Academic Year</b>?",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
     return STATE_YEAR
 
+async def back_to_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[KeyboardButton(y)] for y in YEAR_OPTIONS]
+    keyboard.append([KeyboardButton("⬅️ Back")])
+    await update.message.reply_text(
+        "<b>Step 4/9:</b> What is your <b>Academic Year</b>?",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    )
+    return STATE_YEAR
 
 async def onboarding_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["year"] = update.message.text.strip()
     await update.message.reply_text(
-        "<b>Step 5/8:</b> What is your <b>Campus / Dorm / Area</b>? (e.g. North Dorms, Off-Campus West, Engineering Quad)",
+        "<b>Step 5/9:</b> What is your <b>Campus / Dorm / Area</b>? (e.g. North Dorms, Off-Campus West, Engineering Quad)",
         parse_mode="HTML",
-        reply_markup=ReplyKeyboardRemove()
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back")]], resize_keyboard=True)
     )
     return STATE_DORM
 
+async def back_to_dorm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "<b>Step 5/9:</b> What is your <b>Campus / Dorm / Area</b>? (e.g. North Dorms, Off-Campus West, Engineering Quad)",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back")]], resize_keyboard=True)
+    )
+    return STATE_DORM
 
 async def onboarding_dorm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["dorm"] = update.message.text.strip()
-    
     await update.message.reply_text(
-        "<b>Step 6/8:</b> Type 2 to 4 of your <b>Interests & Hobbies</b> separated by commas.\n\n"
+        "<b>Step 6/9:</b> Type 2 to 4 of your <b>Interests & Hobbies</b> separated by commas.\n\n"
         "<i>Examples: Coffee, Coding, Gaming, Gym, Anime, Music, Study Buddies</i>",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back")]], resize_keyboard=True)
     )
     return STATE_INTERESTS
 
+async def back_to_interests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "<b>Step 6/9:</b> Type 2 to 4 of your <b>Interests & Hobbies</b> separated by commas.\n\n"
+        "<i>Examples: Coffee, Coding, Gaming, Gym, Anime, Music, Study Buddies</i>",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back")]], resize_keyboard=True)
+    )
+    return STATE_INTERESTS
 
 async def onboarding_interests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text.strip()
     interests = [x.strip() for x in raw.split(",") if x.strip()]
     context.user_data["onboarding"]["interests"] = interests
-    
     await update.message.reply_text(
-        f"<b>Step 7/8:</b> Write a short <b>Bio</b> about yourself.\n\n"
+        f"<b>Step 7/9:</b> Write a short <b>Bio</b> about yourself.\n\n"
         f"<i>Example: 'Hey! Excited to meet people around campus. Always down for coffee!'</i>",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back")]], resize_keyboard=True)
     )
     return STATE_BIO
 
+async def back_to_bio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"<b>Step 7/9:</b> Write a short <b>Bio</b> about yourself.\n\n"
+        f"<i>Example: 'Hey! Excited to meet people around campus. Always down for coffee!'</i>",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back")]], resize_keyboard=True)
+    )
+    return STATE_BIO
 
 async def onboarding_bio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["bio"] = update.message.text.strip()
-    
     await update.message.reply_text(
-        f"<b>Step 8/8:</b> Upload a <b>Real Photo</b> of yourself!\n\n"
+        f"<b>Step 8/9:</b> Upload a <b>Real Photo</b> of yourself!\n\n"
         f"This helps build trust and makes finding matches better.\n"
         f"(Send a photo, or type /skip to use no photo):",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back")]], resize_keyboard=True)
     )
     return STATE_PHOTO
 
-
 async def onboarding_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.photo:
-        # Get the highest resolution photo
         photo_id = update.message.photo[-1].file_id
         context.user_data["onboarding"]["photo_id"] = photo_id
     else:
-        # If text is provided, we can assume it's /skip or they didn't send a photo
         context.user_data["onboarding"]["photo_id"] = None
         if update.message.text and update.message.text.lower() != '/skip':
-             await update.message.reply_text("Please send a photo, or type /skip.")
+             await update.message.reply_text("Please send a photo, or type /skip.", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back")]], resize_keyboard=True))
              return STATE_PHOTO
              
     user = update.effective_user
@@ -846,7 +926,6 @@ async def onboarding_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-
 async def cancel_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Profile setup cancelled.", reply_markup=get_main_menu_keyboard())
     return ConversationHandler.END
@@ -856,6 +935,7 @@ async def cancel_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # CALLBACK QUERY HANDLER (FILTERS, CANDIDATE CYCLING, START CHATTING)
 # ---------------------------------------------------------------------------
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db.update_activity(update.callback_query.from_user.id)
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1018,20 +1098,45 @@ def main():
     # Onboarding Conversation
     conv_handler = ConversationHandler(
         entry_points=[
-            CallbackQueryHandler(start_onboarding_callback, pattern="^start_onboarding$"),
-            CommandHandler("editprofile", start_onboarding_callback)
+            CallbackQueryHandler(start_onboarding, pattern="^start_onboarding$"),
+            CommandHandler("editprofile", start_onboarding)
         ],
         states={
             STATE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_name)],
-            STATE_GENDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_gender)],
-            STATE_MAJOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_major)],
-            STATE_YEAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_year)],
-            STATE_DORM: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_dorm)],
-            STATE_INTERESTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_interests)],
-            STATE_BIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_bio)],
-            STATE_PHOTO: [MessageHandler((filters.PHOTO | filters.TEXT) & ~filters.COMMAND, onboarding_photo)],
+            STATE_AGE: [
+                MessageHandler(filters.Regex(r"^⬅️ Back$"), back_to_name),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_age)
+            ],
+            STATE_GENDER: [
+                MessageHandler(filters.Regex(r"^⬅️ Back$"), back_to_age),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_gender)
+            ],
+            STATE_MAJOR: [
+                MessageHandler(filters.Regex(r"^⬅️ Back$"), back_to_gender),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_major)
+            ],
+            STATE_YEAR: [
+                MessageHandler(filters.Regex(r"^⬅️ Back$"), back_to_major),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_year)
+            ],
+            STATE_DORM: [
+                MessageHandler(filters.Regex(r"^⬅️ Back$"), back_to_year),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_dorm)
+            ],
+            STATE_INTERESTS: [
+                MessageHandler(filters.Regex(r"^⬅️ Back$"), back_to_dorm),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_interests)
+            ],
+            STATE_BIO: [
+                MessageHandler(filters.Regex(r"^⬅️ Back$"), back_to_interests),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_bio)
+            ],
+            STATE_PHOTO: [
+                MessageHandler(filters.Regex(r"^⬅️ Back$"), back_to_bio),
+                MessageHandler((filters.PHOTO | filters.TEXT) & ~filters.COMMAND, onboarding_photo)
+            ],
         },
-        fallbacks=[CommandHandler("cancel", cancel_onboarding)],
+        fallbacks=[CommandHandler("cancel", cancel_onboarding), MessageHandler(filters.Regex(r"^⬅️ Back$"), cancel_onboarding)],
     )
 
     app.add_handler(conv_handler)

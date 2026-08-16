@@ -50,6 +50,8 @@ class DatabaseManager:
                             interests TEXT DEFAULT '',
                             bio TEXT DEFAULT '',
                             social_handle TEXT,
+                            age TEXT DEFAULT 'Not specified',
+                            last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             photo_id TEXT,
                             is_banned BOOLEAN DEFAULT FALSE,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -75,6 +77,8 @@ class DatabaseManager:
                         await conn.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS gender TEXT DEFAULT 'Not specified';")
                         await conn.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS preferred_gender TEXT DEFAULT 'Any';")
                         await conn.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS photo_id TEXT;")
+                        await conn.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS age TEXT DEFAULT 'Not specified';")
+                        await conn.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
                     except Exception as err:
                         logger.debug(f"Schema alter notice (PG): {err}")
                 logger.info("Connected to PostgreSQL Database (Aiven/Cloud) successfully.")
@@ -98,6 +102,8 @@ class DatabaseManager:
                 interests TEXT DEFAULT '',
                 bio TEXT DEFAULT '',
                 social_handle TEXT,
+                            age TEXT DEFAULT 'Not specified',
+                            last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 photo_id TEXT,
                 is_banned INTEGER DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -131,6 +137,14 @@ class DatabaseManager:
             cur.execute("ALTER TABLE students ADD COLUMN photo_id TEXT;")
         except Exception:
             pass
+        try:
+            cur.execute("ALTER TABLE students ADD COLUMN age TEXT DEFAULT 'Not specified';")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE students ADD COLUMN last_active DATETIME DEFAULT CURRENT_TIMESTAMP;")
+        except Exception:
+            pass
         conn.commit()
         conn.close()
         logger.info(f"Initialized SQLite Database at {self.sqlite_file}.")
@@ -155,6 +169,7 @@ class DatabaseManager:
         """Save or update student profile."""
         user_id = data["user_id"]
         username = data.get("username", "")
+        age = data.get("age", "Not specified")
         name = data.get("name") or data.get("full_name") or "Fellow Student"
         gender = data.get("gender", "Not specified")
         preferred_gender = data.get("preferred_gender", "Any")
@@ -169,8 +184,8 @@ class DatabaseManager:
         if self.is_postgres and self.pg_pool:
             async with self.pg_pool.acquire() as conn:
                 await conn.execute("""
-                    INSERT INTO students (user_id, username, full_name, gender, preferred_gender, major, study_year, dorm, interests, bio, social_handle, photo_id)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    INSERT INTO students (user_id, username, full_name, gender, preferred_gender, major, study_year, dorm, interests, bio, social_handle, photo_id, age)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                     ON CONFLICT (user_id) DO UPDATE SET
                         username = EXCLUDED.username,
                         full_name = EXCLUDED.full_name,
@@ -182,17 +197,33 @@ class DatabaseManager:
                         interests = EXCLUDED.interests,
                         bio = EXCLUDED.bio,
                         social_handle = EXCLUDED.social_handle,
-                        photo_id = EXCLUDED.photo_id;
-                """, user_id, username, name, gender, preferred_gender, major, year, dorm, interests, bio, handle, photo_id)
+                        photo_id = EXCLUDED.photo_id,
+                        age = EXCLUDED.age;
+                """, user_id, username, name, gender, preferred_gender, major, year, dorm, interests, bio, handle, photo_id, age)
         else:
             conn = sqlite3.connect(self.sqlite_file)
             cur = conn.cursor()
             cur.execute("""
-                INSERT OR REPLACE INTO students (user_id, username, full_name, gender, preferred_gender, major, study_year, dorm, interests, bio, social_handle, photo_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (user_id, username, name, gender, preferred_gender, major, year, dorm, interests, bio, handle, photo_id))
+                INSERT OR REPLACE INTO students (user_id, username, full_name, gender, preferred_gender, major, study_year, dorm, interests, bio, social_handle, photo_id, age)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, username, name, gender, preferred_gender, major, year, dorm, interests, bio, handle, photo_id, age))
             conn.commit()
             conn.close()
+
+    
+    async def update_activity(self, user_id: int):
+        if self.is_postgres and self.pg_pool:
+            async with self.pg_pool.acquire() as conn:
+                await conn.execute("UPDATE students SET last_active = CURRENT_TIMESTAMP WHERE user_id = $1", user_id)
+        else:
+            try:
+                conn = sqlite3.connect(self.sqlite_file)
+                cur = conn.cursor()
+                cur.execute("UPDATE students SET last_active = CURRENT_TIMESTAMP WHERE user_id = ?", (user_id,))
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
 
     async def update_preference(self, user_id: int, preferred_gender: str):
         """Update student's preferred matching filter."""
@@ -206,7 +237,7 @@ class DatabaseManager:
             conn.commit()
             conn.close()
 
-    async def find_candidates(self, user_id: int, gender_filter: str = "Any", exclude_ids: Optional[Set[int]] = None) -> List[dict]:
+    async def find_candidates(self, user_id: int, gender_filter: str = "Any", exclude_ids: Optional[Set[int]] = None, current_user_profile: dict = None) -> List[dict]:
         """Find candidate student profiles matching the chosen filter."""
         exclude_list = list(exclude_ids or set())
         if user_id not in exclude_list:
@@ -222,7 +253,7 @@ class DatabaseManager:
                           AND user_id != ALL($1) 
                           AND gender ILIKE $2
                         ORDER BY total_chats ASC, RANDOM()
-                        LIMIT 20
+                        LIMIT 50
                     """
                     records = await conn.fetch(query, exclude_list, f"%{gender_filter}%")
                 else:
@@ -231,7 +262,7 @@ class DatabaseManager:
                         WHERE is_banned = FALSE 
                           AND user_id != ALL($1)
                         ORDER BY total_chats ASC, RANDOM()
-                        LIMIT 20
+                        LIMIT 50
                     """
                     records = await conn.fetch(query, exclude_list)
                 rows = [dict(r) for r in records]
@@ -248,7 +279,7 @@ class DatabaseManager:
                       AND user_id NOT IN ({placeholders})
                       AND gender LIKE ?
                     ORDER BY total_chats ASC, RANDOM()
-                    LIMIT 20
+                    LIMIT 50
                 """
                 params = list(exclude_list) + [f"%{gender_filter}%"]
                 cur.execute(query, params)
@@ -258,14 +289,47 @@ class DatabaseManager:
                     WHERE is_banned = 0 
                       AND user_id NOT IN ({placeholders})
                     ORDER BY total_chats ASC, RANDOM()
-                    LIMIT 20
+                    LIMIT 50
                 """
                 cur.execute(query, exclude_list)
             records = cur.fetchall()
             rows = [dict(r) for r in records]
             conn.close()
 
-        return rows
+        
+        # Advanced Matching Algorithm: Score and Sort Candidates
+        if current_user_profile and rows:
+            my_major = current_user_profile.get("major", "")
+            my_year = current_user_profile.get("study_year", "")
+            my_dorm = current_user_profile.get("dorm", "")
+            my_interests_str = current_user_profile.get("interests", "")
+            my_interests = set([i.strip().lower() for i in my_interests_str.split(",") if i.strip()])
+            
+            for row in rows:
+                score = 0
+                # Same Major (+3 points)
+                if row.get("major") == my_major and my_major and my_major != "Undeclared":
+                    score += 3
+                # Same Year (+1 point)
+                if row.get("study_year") == my_year and my_year:
+                    score += 1
+                # Same Dorm (+1 point)
+                if row.get("dorm") == my_dorm and my_dorm:
+                    score += 1
+                # Shared Interests (+2 points per match)
+                their_interests_str = row.get("interests", "")
+                their_interests = set([i.strip().lower() for i in their_interests_str.split(",") if i.strip()])
+                common = my_interests.intersection(their_interests)
+                score += len(common) * 2
+                
+                # Active recently bonus could go here (relying on DB sort for now)
+                
+                row['match_score'] = score
+                
+            # Sort by match_score DESC, total_chats ASC (to balance), then we can pick top
+            rows.sort(key=lambda x: (x.get('match_score', 0), -x.get('total_chats', 0)), reverse=True)
+            
+        return rows[:20]  # Return top 20 best matches
 
     async def increment_chat_count(self, user1: int, user2: int):
         """Update student stats."""
