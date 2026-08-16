@@ -179,19 +179,15 @@ async def send_asset_animation(chat_id: int, animation_key: str, context: Contex
         candidate_path = os.path.join(assets_dir, filename)
         if os.path.exists(candidate_path):
             try:
-                with open(candidate_path, "rb") as f:
-                    file_bytes = f.read()
-
                 if ext == ".tgs":
-                    # Send with InputFile and filename='sticker.tgs' so Telegram recognizes it as an animated vector sticker
-                    input_file = InputFile(file_bytes, filename="animation.tgs")
-                    await context.bot.send_sticker(chat_id=chat_id, sticker=input_file)
+                    with open(candidate_path, "rb") as f:
+                        await context.bot.send_sticker(chat_id=chat_id, sticker=f)
                 elif ext in [".gif", ".mp4"]:
-                    input_file = InputFile(file_bytes, filename=filename)
-                    await context.bot.send_animation(chat_id=chat_id, animation=input_file)
+                    with open(candidate_path, "rb") as f:
+                        await context.bot.send_animation(chat_id=chat_id, animation=f)
                 elif ext in [".webp", ".png"]:
-                    input_file = InputFile(file_bytes, filename=filename)
-                    await context.bot.send_photo(chat_id=chat_id, photo=input_file)
+                    with open(candidate_path, "rb") as f:
+                        await context.bot.send_photo(chat_id=chat_id, photo=f)
                 return True
             except Exception as e:
                 logger.warning(f"Could not send animation asset {candidate_path}: {e}")
