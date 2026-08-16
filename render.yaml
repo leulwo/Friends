@@ -1,0 +1,16 @@
+services:
+  # Free tier compatible Web Service on Render (with integrated health check)
+  - type: web
+    name: campus-stranger-telegram-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: UNIVERSITY_NAME
+        value: "Campus"
+      - key: DATABASE_URL
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.0
