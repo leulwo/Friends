@@ -101,6 +101,53 @@ viewed_candidates: Dict[int, Set[int]] = {}
 blocked_pairs: Dict[int, Set[int]] = {}
 # Current active candidate preview: user_id -> candidate_id
 current_previews: Dict[int, int] = {}
+# UI / Temporary message tracking for self-cleaning: user_id -> list of message_ids
+ui_messages: Dict[int, List[int]] = {}
+
+
+# ---------------------------------------------------------------------------
+# SELF-CLEANING & TRANSIENT UI HELPERS (APPEAR & FADE OUT)
+# ---------------------------------------------------------------------------
+def track_ui_message(user_id: int, message_id: int):
+    """Tracks a UI message or animation so old screens can be automatically cleaned up."""
+    if user_id not in ui_messages:
+        ui_messages[user_id] = []
+    ui_messages[user_id].append(message_id)
+    # Keep list bounded
+    if len(ui_messages[user_id]) > 30:
+        ui_messages[user_id] = ui_messages[user_id][-30:]
+
+
+async def cleanup_user_ui(chat_id: int, context: ContextTypes.DEFAULT_TYPE, keep_last: int = 0):
+    """Deletes previous transient bot UI messages and search cards to keep the chat clean."""
+    if chat_id not in ui_messages or not ui_messages[chat_id]:
+        return
+
+    to_delete = ui_messages[chat_id][:-keep_last] if keep_last > 0 else ui_messages[chat_id][:]
+    remaining = ui_messages[chat_id][-keep_last:] if keep_last > 0 else []
+    ui_messages[chat_id] = remaining
+
+    for msg_id in to_delete:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            pass  # Message might already be deleted or expired
+
+
+async def fade_out_message_after_delay(chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE, delay_seconds: float = 6.0):
+    """Fades out (auto-deletes) an alert, animation sticker, or transient confirmation after a short duration."""
+    await asyncio.sleep(delay_seconds)
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        if chat_id in ui_messages and message_id in ui_messages[chat_id]:
+            ui_messages[chat_id].remove(message_id)
+    except Exception:
+        pass
+
+
+def auto_fade(chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE, delay_seconds: float = 6.0):
+    """Schedules background task to auto-delete a transient UI message or animated sticker."""
+    asyncio.create_task(fade_out_message_after_delay(chat_id, message_id, context, delay_seconds))
 
 
 # ---------------------------------------------------------------------------
@@ -109,8 +156,8 @@ current_previews: Dict[int, int] = {}
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
     """Persistent action buttons in the main menu."""
     keyboard = [
-        [KeyboardButton("🔍 Find Campus Match"), KeyboardButton("🎯 Gender & Filters")],
-        [KeyboardButton("👤 My Student Profile"), KeyboardButton("❓ Help & Rules")]
+        [KeyboardButton("Find Campus Match"), KeyboardButton("Gender & Filters")],
+        [KeyboardButton("My Profile"), KeyboardButton("Help & Rules")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -118,8 +165,8 @@ def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
 def get_in_chat_keyboard() -> ReplyKeyboardMarkup:
     """Action buttons while in an active 1-on-1 conversation."""
     keyboard = [
-        [KeyboardButton("⏭️ Next Match"), KeyboardButton("🛑 End Chat")],
-        [KeyboardButton("📍 Suggest Campus Spot"), KeyboardButton("🛡️ Report User")]
+        [KeyboardButton("Next Match"), KeyboardButton("End Chat")],
+        [KeyboardButton("Suggest Campus Spot"), KeyboardButton("Report User")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -128,7 +175,7 @@ def get_filter_keyboard(current_filter: str = "filter_any") -> InlineKeyboardMar
     """Filter selector keyboard."""
     buttons = []
     for label, code in FILTER_OPTIONS:
-        prefix = "✅ " if code == current_filter else ""
+        prefix = "• " if code == current_filter else ""
         buttons.append([InlineKeyboardButton(f"{prefix}{label}", callback_data=f"apply_{code}")])
     return InlineKeyboardMarkup(buttons)
 
@@ -150,27 +197,29 @@ def format_profile_card(student: dict, is_self: bool = False) -> str:
     
     chats_count = student.get("total_chats", 0)
 
-    header = "👤 <b>YOUR STUDENT PROFILE</b>" if is_self else "🎉 <b>CAMPUS MATCH FOUND!</b>"
+    header = "<b>YOUR STUDENT PROFILE</b>" if is_self else "<b>CAMPUS MATCH FOUND</b>"
 
     card = (
-        f"{header} 🎓\n\n"
-        f"👤 <b>Name:</b> {name}\n"
-        f"⚧ <b>Gender:</b> {gender}\n"
-        f"📚 <b>Major:</b> {major} ({year})\n"
-        f"🏢 <b>Dorm / Area:</b> {dorm}\n"
-        f"✨ <b>Interests:</b> {interests}\n"
-        f"📝 <b>Bio:</b> <i>\"{bio}\"</i>\n"
-        f"🔗 <b>Telegram Handle:</b> <code>{handle}</code>\n"
-        f"📊 <b>Campus Chats:</b> {chats_count} chats\n"
+        f"{header}\n\n"
+        f"<b>Name:</b> {name}\n"
+        f"<b>Gender:</b> {gender}\n"
+        f"<b>Major:</b> {major} ({year})\n"
+        f"<b>Campus / Area:</b> {dorm}\n"
+        f"<b>Interests:</b> {interests}\n"
+        f"<b>Bio:</b> <i>\"{bio}\"</i>\n"
+        f"<b>Telegram:</b> <code>{handle}</code>\n"
+        f"<b>Completed Chats:</b> {chats_count}\n"
     )
     return card
 
 
-async def send_asset_animation(chat_id: int, animation_key: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def send_asset_animation(chat_id: int, animation_key: str, context: ContextTypes.DEFAULT_TYPE, auto_delete_seconds: Optional[float] = 5.0) -> bool:
     """
     Sends Telegram animated stickers (.tgs) either via configured STICKER_IDS file_id(s)
     (randomly chosen if multiple stickers match) or directly from /assets/{animation_key}.tgs.
+    Optionally auto-fades / deletes the sticker after a brief animation view duration to keep chat clean.
     """
+    sent_msg = None
     # 1. Check if Telegram Sticker File ID(s) are configured in STICKER_IDS
     sticker_entry = STICKER_IDS.get(animation_key)
     sticker_candidates = []
@@ -182,8 +231,12 @@ async def send_asset_animation(chat_id: int, animation_key: str, context: Contex
     if sticker_candidates:
         chosen_id = random.choice(sticker_candidates)
         try:
-            await context.bot.send_sticker(chat_id=chat_id, sticker=chosen_id)
+            sent_msg = await context.bot.send_sticker(chat_id=chat_id, sticker=chosen_id)
             logger.info(f"Sent sticker by file_id for {animation_key} (from {len(sticker_candidates)} options) to {chat_id}")
+            if sent_msg:
+                track_ui_message(chat_id, sent_msg.message_id)
+                if auto_delete_seconds and auto_delete_seconds > 0:
+                    auto_fade(chat_id, sent_msg.message_id, context, auto_delete_seconds)
             return True
         except Exception as e:
             logger.warning(f"Could not send sticker by file_id for {animation_key}: {e}")
@@ -198,9 +251,9 @@ async def send_asset_animation(chat_id: int, animation_key: str, context: Contex
         "welcome": ["welcome.tgs", "Welcome.tgs"],
         "chat_start": ["chat_start.tgs", "Chat.tgs", "chat.tgs", "Chat_start.tgs"],
         "match_found": ["match_found.tgs", "Wave Animation.tgs", "wave.tgs", "Wave.tgs", "Match_found.tgs"],
-        "search": ["search.tgs", "Search.tgs"],
-        "loading": ["loading.tgs", "Loader animation.tgs", "Loader.tgs", "loader.tgs", "Loading.tgs"],
-        "bored_waiting": ["bored_waiting.tgs", "Loading Animation Bored Hand.tgs", "bored.tgs", "Bored.tgs"],
+        "search": ["search.tgs", "Search.tgs", "loading.tgs", "Loader animation.tgs", "Loading Animation Bored Hand.tgs", "carr.tgs"],
+        "loading": ["loading.tgs", "Loader animation.tgs", "Loader.tgs", "loader.tgs", "Loading.tgs", "Loading Animation Bored Hand.tgs", "search.tgs"],
+        "bored_waiting": ["bored_waiting.tgs", "Loading Animation Bored Hand.tgs", "bored.tgs", "Bored.tgs", "loading.tgs"],
         "car": ["car.tgs", "carr.tgs", "Car.tgs"]
     }
 
@@ -216,8 +269,12 @@ async def send_asset_animation(chat_id: int, animation_key: str, context: Contex
             with open(chosen_path, "rb") as f:
                 file_bytes = f.read()
             input_file = InputFile(file_bytes, filename=f"{animation_key}.tgs")
-            await context.bot.send_sticker(chat_id=chat_id, sticker=input_file)
+            sent_msg = await context.bot.send_sticker(chat_id=chat_id, sticker=input_file)
             logger.info(f"Successfully sent .tgs sticker {os.path.basename(chosen_path)} for {animation_key} to {chat_id}")
+            if sent_msg:
+                track_ui_message(chat_id, sent_msg.message_id)
+                if auto_delete_seconds and auto_delete_seconds > 0:
+                    auto_fade(chat_id, sent_msg.message_id, context, auto_delete_seconds)
             return True
         except Exception as e:
             logger.warning(f"Could not send .tgs sticker asset {chosen_path}: {e}")
@@ -264,13 +321,13 @@ async def search_and_display_candidate(user_id: int, context: ContextTypes.DEFAU
     if not candidates:
         filter_label = "Female" if filter_code == "filter_female" else ("Male" if filter_code == "filter_male" else "any")
         text = (
-            f"🔍 <b>No other {filter_label} students found at this exact moment.</b>\n\n"
+            f"<b>No other {filter_label} students found at this exact moment.</b>\n\n"
             f"Would you like to search with broader filters or try again?"
         )
         keyboard = [
-            [InlineKeyboardButton("✨ Search Anyone (All Students)", callback_data="apply_filter_any")],
-            [InlineKeyboardButton("🔄 Refresh / Try Again", callback_data=f"apply_{filter_code}")],
-            [InlineKeyboardButton("⚙️ Change Filter", callback_data="open_filter_menu")]
+            [InlineKeyboardButton("Search Anyone (All Students)", callback_data="apply_filter_any")],
+            [InlineKeyboardButton("Refresh / Try Again", callback_data=f"apply_{filter_code}")],
+            [InlineKeyboardButton("Change Filter", callback_data="open_filter_menu")]
         ]
         
         if edit_message_id:
@@ -279,7 +336,10 @@ async def search_and_display_candidate(user_id: int, context: ContextTypes.DEFAU
                 return
             except Exception:
                 pass
-        await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        await cleanup_user_ui(user_id, context)
+        sent = await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        track_ui_message(user_id, sent.message_id)
         return
 
     # Pick top candidate
@@ -288,19 +348,19 @@ async def search_and_display_candidate(user_id: int, context: ContextTypes.DEFAU
     viewed_candidates[user_id].add(candidate_id)
     current_previews[user_id] = candidate_id
 
-    # Try sending match found animation if available
-    await send_asset_animation(user_id, "match_found", context)
+    # Try sending match found animation if available (auto-fades in 4 seconds)
+    await send_asset_animation(user_id, "match_found", context, auto_delete_seconds=4.0)
 
     # Format card
     card_text = format_profile_card(candidate, is_self=False)
-    card_text += "\n<i>Tap [💬 Start Chatting] to connect 1-on-1 now!</i>"
+    card_text += "\n<i>Tap [Start Chatting] to connect 1-on-1 now.</i>"
 
     # Action Buttons
     keyboard = [
-        [InlineKeyboardButton("💬 Start Chatting", callback_data=f"start_chat_{candidate_id}")],
+        [InlineKeyboardButton("Start Chatting", callback_data=f"start_chat_{candidate_id}")],
         [
-            InlineKeyboardButton("⏭️ Next Candidate", callback_data=f"next_candidate_{filter_code}"),
-            InlineKeyboardButton("⚙️ Change Filter", callback_data="open_filter_menu")
+            InlineKeyboardButton("Next Candidate", callback_data=f"next_candidate_{filter_code}"),
+            InlineKeyboardButton("Change Filter", callback_data="open_filter_menu")
         ]
     ]
 
@@ -311,7 +371,10 @@ async def search_and_display_candidate(user_id: int, context: ContextTypes.DEFAU
         except Exception:
             pass
 
-    await context.bot.send_message(chat_id=user_id, text=card_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    # Clean old preview UI to keep chat screen clean
+    await cleanup_user_ui(user_id, context)
+    sent = await context.bot.send_message(chat_id=user_id, text=card_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    track_ui_message(user_id, sent.message_id)
 
 
 async def start_chat_session(user1_id: int, user2_id: int, context: ContextTypes.DEFAULT_TYPE):
@@ -321,6 +384,10 @@ async def start_chat_session(user1_id: int, user2_id: int, context: ContextTypes
         await disconnect_chat(user1_id, context, notify_partner=False)
     if user2_id in active_chats:
         await disconnect_chat(user2_id, context, notify_partner=False)
+
+    # Clean previous browsing/search UI cards on both sides for a pristine chat canvas
+    await cleanup_user_ui(user1_id, context)
+    await cleanup_user_ui(user2_id, context)
 
     # Link both users
     active_chats[user1_id] = user2_id
@@ -339,35 +406,37 @@ async def start_chat_session(user1_id: int, user2_id: int, context: ContextTypes
     p2_direct_link = f"https://t.me/{p2_username}" if p2_username and not p2_username.startswith("Will") else None
     p1_direct_link = f"https://t.me/{p1_username}" if p1_username and not p1_username.startswith("Will") else None
 
-    # Trigger chat start celebration animations if available in /assets
-    await send_asset_animation(user1_id, "chat_start", context)
-    await send_asset_animation(user2_id, "chat_start", context)
+    # Trigger chat start celebration animations (auto-fades in 5s so conversation stays clear)
+    await send_asset_animation(user1_id, "chat_start", context, auto_delete_seconds=5.0)
+    await send_asset_animation(user2_id, "chat_start", context, auto_delete_seconds=5.0)
 
     # Message for User 1
     msg1 = (
-        f"🎉 <b>Connected with {p2_name}!</b> 🎓\n\n"
-        f"💬 <b>You can now chat directly in this bot.</b> All text, photos, voice notes, stickers, and files will be relayed instantly!\n"
+        f"<b>Connected with {p2_name}</b>\n\n"
+        f"You can now chat directly in this bot. All text, photos, voice notes, stickers, and files will be relayed instantly.\n"
     )
     if p2_direct_link:
-        msg1 += f"🔗 <b>Direct Telegram Link:</b> <a href=\"{p2_direct_link}\">@{p2_username}</a>\n"
+        msg1 += f"<b>Direct Telegram Link:</b> <a href=\"{p2_direct_link}\">@{p2_username}</a>\n"
     msg1 += "\n<i>Use /next to skip or /stop to end the chat.</i>"
 
     # Message for User 2
     msg2 = (
-        f"🔔 <b>{p1_name} started a 1-on-1 chat with you!</b> 🎓\n\n"
-        f"💬 <b>You can chat right here in the bot.</b> All messages & media are delivered in real-time!\n"
+        f"<b>{p1_name} started a 1-on-1 chat with you</b>\n\n"
+        f"You can chat right here in the bot. All messages and media are delivered in real-time.\n"
     )
     if p1_direct_link:
-        msg2 += f"🔗 <b>Direct Telegram Link:</b> <a href=\"{p1_direct_link}\">@{p1_username}</a>\n"
+        msg2 += f"<b>Direct Telegram Link:</b> <a href=\"{p1_direct_link}\">@{p1_username}</a>\n"
     msg2 += "\n<i>Use /next to skip or /stop to end the chat.</i>"
 
     try:
-        await context.bot.send_message(chat_id=user1_id, text=msg1, parse_mode="HTML", reply_markup=get_in_chat_keyboard(), disable_web_page_preview=True)
+        sent1 = await context.bot.send_message(chat_id=user1_id, text=msg1, parse_mode="HTML", reply_markup=get_in_chat_keyboard(), disable_web_page_preview=True)
+        track_ui_message(user1_id, sent1.message_id)
     except Exception as e:
         logger.error(f"Error sending chat start to {user1_id}: {e}")
 
     try:
-        await context.bot.send_message(chat_id=user2_id, text=msg2, parse_mode="HTML", reply_markup=get_in_chat_keyboard(), disable_web_page_preview=True)
+        sent2 = await context.bot.send_message(chat_id=user2_id, text=msg2, parse_mode="HTML", reply_markup=get_in_chat_keyboard(), disable_web_page_preview=True)
+        track_ui_message(user2_id, sent2.message_id)
     except Exception as e:
         logger.error(f"Error sending chat start to {user2_id}: {e}")
 
@@ -383,7 +452,7 @@ async def disconnect_chat(user_id: int, context: ContextTypes.DEFAULT_TYPE, noti
             try:
                 await context.bot.send_message(
                     chat_id=partner_id,
-                    text=f"👋 <b>Your chat session ended.</b> ({reason})\n\nTap below to find a new match!",
+                    text=f"<b>Your chat session ended.</b> ({reason})\n\nTap below to find a new match.",
                     parse_mode="HTML",
                     reply_markup=get_main_menu_keyboard()
                 )
@@ -399,30 +468,35 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db_user = await db.get_user(user.id)
 
-    # Trigger welcome animation sticker
-    await send_asset_animation(user.id, "welcome", context)
+    # Clean old transient messages
+    await cleanup_user_ui(user.id, context)
+
+    # Trigger welcome animation sticker (auto-fades in 5s)
+    await send_asset_animation(user.id, "welcome", context, auto_delete_seconds=5.0)
 
     if not db_user:
         welcome_text = (
-            f"👋 Welcome to <b>{UNIVERSITY_NAME} Stranger & Friend Finder</b>! 🏛️\n\n"
-            f"Connect 1-on-1 with students across campus using custom filters (Female, Male, Major, Hobbies). "
-            f"Preview profiles, usernames, and start chatting instantly!\n\n"
-            f"Let's set up your quick student profile (takes 20 seconds) 👇"
+            f"Welcome to <b>{UNIVERSITY_NAME} Stranger & Friend Finder</b>\n\n"
+            f"Connect 1-on-1 with students across campus using custom filters. "
+            f"Preview profiles and start chatting instantly.\n\n"
+            f"Let's set up your student profile (takes 20 seconds) 👇"
         )
-        keyboard = [[InlineKeyboardButton("🚀 Create Student Profile", callback_data="start_onboarding")]]
-        await update.message.reply_text(
+        keyboard = [[InlineKeyboardButton("Create Student Profile", callback_data="start_onboarding")]]
+        sent = await update.message.reply_text(
             welcome_text,
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+        track_ui_message(user.id, sent.message_id)
     else:
         name = db_user.get("full_name") or "Student"
-        await update.message.reply_text(
-            f"Welcome back, <b>{name}</b>! 🎓\n\n"
+        sent = await update.message.reply_text(
+            f"Welcome back, <b>{name}</b>.\n\n"
             f"What would you like to do today?",
             parse_mode="HTML",
             reply_markup=get_main_menu_keyboard()
         )
+        track_ui_message(user.id, sent.message_id)
 
 
 async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -431,17 +505,19 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_user = await db.get_user(user_id)
 
     if not db_user:
-        await update.message.reply_text(
-            "⚠️ Please complete your student profile first to find matches!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 Setup Profile", callback_data="start_onboarding")]])
+        sent = await update.message.reply_text(
+            "Please complete your student profile first to find matches.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Setup Profile", callback_data="start_onboarding")]])
         )
+        track_ui_message(user_id, sent.message_id)
         return
 
     if user_id in active_chats:
-        await update.message.reply_text(
-            "⚠️ You are currently in an active chat! Use /next to find someone else or /stop to end it.",
+        sent = await update.message.reply_text(
+            "You are currently in an active chat. Use /next to find someone else or /stop to end it.",
             reply_markup=get_in_chat_keyboard()
         )
+        track_ui_message(user_id, sent.message_id)
         return
 
     # Check user's preferred filter
@@ -450,10 +526,12 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_filter = "filter_any"
 
     text = (
-        f"🔍 <b>Find Campus Match at {UNIVERSITY_NAME}</b>\n\n"
-        f"Select your match filter below or search anyone instantly:"
+        f"<b>Find Campus Match at {UNIVERSITY_NAME}</b>\n\n"
+        f"Select your match filter below or search anyone:"
     )
-    await update.message.reply_text(text, parse_mode="HTML", reply_markup=get_filter_keyboard(current_filter))
+    await cleanup_user_ui(user_id, context)
+    sent = await update.message.reply_text(text, parse_mode="HTML", reply_markup=get_filter_keyboard(current_filter))
+    track_ui_message(user_id, sent.message_id)
 
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -461,7 +539,8 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in active_chats:
         await disconnect_chat(user_id, context, notify_partner=True, reason="Partner skipped to /next")
-        await update.message.reply_text("⏭️ <b>Skipped!</b> Finding a new student match...", parse_mode="HTML")
+        sent = await update.message.reply_text("<b>Skipped.</b> Finding a new student match...", parse_mode="HTML")
+        auto_fade(user_id, sent.message_id, context, delay_seconds=3.0)
         await search_and_display_candidate(user_id, context, filter_code="filter_any")
     else:
         await search_and_display_candidate(user_id, context, filter_code="filter_any")
@@ -472,16 +551,19 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in active_chats:
         await disconnect_chat(user_id, context, notify_partner=True, reason="Partner ended the chat")
-        await update.message.reply_text("🛑 <b>Chat ended.</b>", parse_mode="HTML", reply_markup=get_main_menu_keyboard())
+        sent = await update.message.reply_text("<b>Chat ended.</b>", parse_mode="HTML", reply_markup=get_main_menu_keyboard())
+        track_ui_message(user_id, sent.message_id)
     else:
-        await update.message.reply_text("You are not currently in any active chat.", reply_markup=get_main_menu_keyboard())
+        sent = await update.message.reply_text("You are not currently in any active chat.", reply_markup=get_main_menu_keyboard())
+        auto_fade(user_id, sent.message_id, context, delay_seconds=4.0)
 
 
 async def meet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Suggest random campus meetup spot and icebreaker."""
     user_id = update.effective_user.id
     if user_id not in active_chats:
-        await update.message.reply_text("⚠️ Connect with a student first using /find!")
+        sent = await update.message.reply_text("Connect with a student first using /find.")
+        auto_fade(user_id, sent.message_id, context, delay_seconds=4.0)
         return
 
     partner_id = active_chats[user_id]
@@ -489,10 +571,10 @@ async def meet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     icebreaker = random.choice(ICEBREAKERS)
 
     text = (
-        f"📍 <b>Campus Meetup Suggestion</b> 🏛️\n\n"
-        f"📌 <b>Spot:</b> {spot}\n"
-        f"💡 <b>Icebreaker Question:</b> <i>\"{icebreaker}\"</i>\n\n"
-        f"<i>Want to grab coffee or study there together? Send a message to your partner!</i>"
+        f"<b>Campus Meetup Suggestion</b>\n\n"
+        f"<b>Spot:</b> {spot}\n"
+        f"<b>Icebreaker Question:</b> <i>\"{icebreaker}\"</i>\n\n"
+        f"<i>Want to meet there or grab coffee together? Send a message to your partner.</i>"
     )
 
     await update.message.reply_text(text, parse_mode="HTML")
@@ -503,7 +585,8 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Report and permanently block inappropriate partner."""
     user_id = update.effective_user.id
     if user_id not in active_chats:
-        await update.message.reply_text("⚠️ You can only report a user during an active chat.")
+        sent = await update.message.reply_text("You can only report a user during an active chat.")
+        auto_fade(user_id, sent.message_id, context, delay_seconds=4.0)
         return
 
     partner_id = active_chats[user_id]
@@ -513,10 +596,11 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await disconnect_chat(user_id, context, notify_partner=True, reason="Reported and blocked")
     await db.log_report(user_id, partner_id, "Inappropriate chat behavior report")
 
-    await update.message.reply_text(
-        "🛡️ <b>User reported and permanently blocked.</b> You will never be matched with them again.\n\nSearching for a new student...",
+    sent = await update.message.reply_text(
+        "<b>User reported and permanently blocked.</b> You will not be matched with them again.\n\nSearching for a new student...",
         parse_mode="HTML"
     )
+    auto_fade(user_id, sent.message_id, context, delay_seconds=4.0)
     await search_and_display_candidate(user_id, context, filter_code="filter_any")
 
 
@@ -525,18 +609,21 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     p = await db.get_user(user_id)
     if not p:
-        await update.message.reply_text(
-            "No profile found. Let's create one!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 Create Profile", callback_data="start_onboarding")]])
+        sent = await update.message.reply_text(
+            "No profile found. Let's create one.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Create Profile", callback_data="start_onboarding")]])
         )
+        track_ui_message(user_id, sent.message_id)
         return
 
+    await cleanup_user_ui(user_id, context)
     card = format_profile_card(p, is_self=True)
     keyboard = [
-        [InlineKeyboardButton("✏️ Edit Profile", callback_data="start_onboarding")],
-        [InlineKeyboardButton("🎯 Change Match Filters", callback_data="open_filter_menu")]
+        [InlineKeyboardButton("Edit Profile", callback_data="start_onboarding")],
+        [InlineKeyboardButton("Change Match Filters", callback_data="open_filter_menu")]
     ]
-    await update.message.reply_text(card, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    sent = await update.message.reply_text(card, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    track_ui_message(user_id, sent.message_id)
 
 
 # ---------------------------------------------------------------------------
@@ -548,30 +635,30 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text if update.message else ""
 
     # Menu triggers
-    if text == "🔍 Find Campus Match":
+    if text in ["Find Campus Match", "🔍 Find Campus Match"]:
         await find_command(update, context)
         return
-    elif text == "🎯 Gender & Filters":
+    elif text in ["Gender & Filters", "🎯 Gender & Filters"]:
         await find_command(update, context)
         return
-    elif text == "⏭️ Next Match":
+    elif text in ["Next Match", "⏭️ Next Match"]:
         await next_command(update, context)
         return
-    elif text == "🛑 End Chat":
+    elif text in ["End Chat", "🛑 End Chat"]:
         await stop_command(update, context)
         return
-    elif text == "📍 Suggest Campus Spot":
+    elif text in ["Suggest Campus Spot", "📍 Suggest Campus Spot"]:
         await meet_command(update, context)
         return
-    elif text == "🛡️ Report User":
+    elif text in ["Report User", "🛡️ Report User"]:
         await report_command(update, context)
         return
-    elif text == "👤 My Student Profile":
+    elif text in ["My Profile", "👤 My Student Profile"]:
         await profile_command(update, context)
         return
-    elif text == "❓ Help & Rules":
+    elif text in ["Help & Rules", "❓ Help & Rules"]:
         await update.message.reply_text(
-            f"📖 <b>{UNIVERSITY_NAME} Bot Rules & Help</b>\n\n"
+            f"<b>{UNIVERSITY_NAME} Bot Rules & Help</b>\n\n"
             "1. <b>Respect:</b> Treat fellow students with kindness and respect.\n"
             "2. <b>Filter Match:</b> Choose your filters (Female, Male, Anyone) before searching.\n"
             "3. <b>Profile Preview:</b> Review student bios and handles before tapping [Start Chatting].\n"
@@ -591,7 +678,7 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if user is in an active chat
     if user_id not in active_chats:
         await update.message.reply_text(
-            "💬 You are not in an active chat right now. Tap <b>🔍 Find Campus Match</b> below to connect with students!",
+            "You are not in an active chat right now. Tap <b>Find Campus Match</b> below to connect with students.",
             parse_mode="HTML",
             reply_markup=get_main_menu_keyboard()
         )
@@ -640,7 +727,7 @@ async def start_onboarding_callback(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     await query.answer()
     context.user_data["onboarding"] = {}
-    await query.edit_message_text("🎓 <b>Step 1/7:</b> What is your <b>First Name</b> or Nickname on campus?", parse_mode="HTML")
+    await query.edit_message_text("<b>Step 1/7:</b> What is your <b>First Name</b> or Nickname on campus?", parse_mode="HTML")
     return STATE_NAME
 
 
@@ -649,7 +736,7 @@ async def onboarding_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [[KeyboardButton(g)] for g in GENDER_OPTIONS]
     await update.message.reply_text(
-        "⚧ <b>Step 2/7:</b> What is your <b>Gender</b>? (Used for match filtering)",
+        "<b>Step 2/7:</b> What is your <b>Gender</b>? (Used for match filtering)",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
@@ -659,7 +746,7 @@ async def onboarding_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def onboarding_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["gender"] = update.message.text.strip()
     await update.message.reply_text(
-        "📚 <b>Step 3/7:</b> What is your <b>Major / Department</b>? (e.g. Computer Science, Business, Biology, Medicine)",
+        "<b>Step 3/7:</b> What is your <b>Major / Department</b>? (e.g. Computer Science, Business, Biology, Medicine)",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove()
     )
@@ -671,7 +758,7 @@ async def onboarding_major(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [[KeyboardButton(y)] for y in YEAR_OPTIONS]
     await update.message.reply_text(
-        "📅 <b>Step 4/7:</b> What is your <b>Academic Year</b>?",
+        "<b>Step 4/7:</b> What is your <b>Academic Year</b>?",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
@@ -681,7 +768,7 @@ async def onboarding_major(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def onboarding_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["year"] = update.message.text.strip()
     await update.message.reply_text(
-        "🏢 <b>Step 5/7:</b> What is your <b>Campus / Dorm / Area</b>? (e.g. North Dorms, Off-Campus West, Engineering Quad)",
+        "<b>Step 5/7:</b> What is your <b>Campus / Dorm / Area</b>? (e.g. North Dorms, Off-Campus West, Engineering Quad)",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove()
     )
@@ -692,7 +779,7 @@ async def onboarding_dorm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["dorm"] = update.message.text.strip()
     
     await update.message.reply_text(
-        "✨ <b>Step 6/7:</b> Type 2 to 4 of your <b>Interests & Hobbies</b> separated by commas.\n\n"
+        "<b>Step 6/7:</b> Type 2 to 4 of your <b>Interests & Hobbies</b> separated by commas.\n\n"
         "<i>Examples: Coffee, Coding, Gaming, Gym, Anime, Music, Study Buddies</i>",
         parse_mode="HTML"
     )
@@ -708,7 +795,7 @@ async def onboarding_interests(update: Update, context: ContextTypes.DEFAULT_TYP
     default_handle = f"@{user.username}" if user.username else "Will share manually"
 
     await update.message.reply_text(
-        f"🔗 <b>Step 7/7:</b> What is your <b>Telegram Username or Social Handle</b>?\n\n"
+        f"<b>Step 7/7:</b> What is your <b>Telegram Username or Social Handle</b>?\n\n"
         f"This will be visible on your profile card so matches can connect with you.\n"
         f"(Default: <code>{default_handle}</code> or type custom):",
         parse_mode="HTML"
@@ -731,9 +818,9 @@ async def onboarding_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_asset_animation(user.id, "welcome", context)
 
     await update.message.reply_text(
-        f"🎉 <b>Profile Created Successfully!</b> 🎓\n\n"
-        f"You are all set to find new friends across {UNIVERSITY_NAME}!\n"
-        f"Tap <b>🔍 Find Campus Match</b> below to choose filters and start matching.",
+        f"<b>Profile Created Successfully</b>\n\n"
+        f"You are all set to find new friends across {UNIVERSITY_NAME}.\n"
+        f"Tap <b>Find Campus Match</b> below to choose filters and start matching.",
         parse_mode="HTML",
         reply_markup=get_main_menu_keyboard()
     )
@@ -857,21 +944,34 @@ async def post_init(app: Application):
                 emoji = sticker.emoji or ""
                 logger.info(f"Sticker [{idx}]: emoji='{emoji}', file_id='{sticker.file_id[:16]}...'")
 
-                # Check clock emojis and digits
+                # Match 1 o'clock (🕐, 1) -> loading/search animation pool
                 if "🕐" in emoji or "1️⃣" in emoji or emoji == "1" or idx == 0:
                     add_sticker("loading", sticker.file_id)
+                    add_sticker("search", sticker.file_id)
+                # Match 2 o'clock (🕑, 2) -> match_found (Wave Animation) / chat_start
                 if "🕑" in emoji or "2️⃣" in emoji or emoji == "2" or idx == 1:
                     add_sticker("match_found", sticker.file_id)
+                # Match 3 o'clock (🕒, 3) -> car (carr.tgs) / search / loading pool
                 if "🕒" in emoji or "3️⃣" in emoji or emoji == "3" or idx == 2:
                     add_sticker("car", sticker.file_id)
+                    add_sticker("search", sticker.file_id)
+                    add_sticker("loading", sticker.file_id)
+                # Match 4 o'clock (🕓, 4) -> bored_waiting (Loading Animation Bored Hand) / loading pool
                 if "🕓" in emoji or "4️⃣" in emoji or emoji == "4" or idx == 3:
                     add_sticker("bored_waiting", sticker.file_id)
+                    add_sticker("loading", sticker.file_id)
+                # Match 5 o'clock (🕔, 5) -> loading (loader animation) / search pool
                 if "🕔" in emoji or "5️⃣" in emoji or emoji == "5" or idx == 4:
                     add_sticker("loading", sticker.file_id)
+                    add_sticker("search", sticker.file_id)
+                # Match 6 o'clock (🕕, 6) -> search (search.tgs) / loading pool
                 if "🕕" in emoji or "6️⃣" in emoji or emoji == "6" or idx == 5:
                     add_sticker("search", sticker.file_id)
+                    add_sticker("loading", sticker.file_id)
+                # Match 7 o'clock (🕖, 7) -> chat_start (Chat.tgs)
                 if "🕖" in emoji or "7️⃣" in emoji or emoji == "7" or idx == 6:
                     add_sticker("chat_start", sticker.file_id)
+                # Match 8 o'clock (🕗, 8) -> welcome (Welcome.tgs)
                 if "🕗" in emoji or "8️⃣" in emoji or emoji == "8" or idx == 7:
                     add_sticker("welcome", sticker.file_id)
 

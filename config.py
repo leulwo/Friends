@@ -30,21 +30,21 @@ ICEBREAKERS = [
 ]
 
 INTERESTS_LIST = [
-    "☕ Coffee & Boba", "💻 Coding & Tech", "🎮 Gaming & Esports",
-    "📚 Study Buddy", "🏋️ Gym & Fitness", "🎨 Art & Design",
-    "🎵 Music & Concerts", "🍜 Foodies", "🍿 Movies & Anime",
-    "🌿 Outdoors & Hiking", "📸 Photography", "⚽ Campus Sports"
+    "Coffee & Boba", "Coding & Tech", "Gaming & Esports",
+    "Study Buddy", "Gym & Fitness", "Art & Design",
+    "Music & Concerts", "Foodies", "Movies & Anime",
+    "Outdoors & Hiking", "Photography", "Campus Sports"
 ]
 
 YEAR_OPTIONS = ["Freshman (1st)", "Sophomore (2nd)", "Junior (3rd)", "Senior (4th)", "Grad / Master / PhD"]
 
-GENDER_OPTIONS = ["👨 Male", "👩 Female", "🌈 Non-Binary / Other", "🤐 Prefer not to say"]
+GENDER_OPTIONS = ["Male", "Female", "Non-Binary / Other", "Prefer not to say"]
 
 FILTER_OPTIONS = [
-    ("✨ Anyone (Fastest)", "filter_any"),
-    ("👩 Female Students", "filter_female"),
-    ("👨 Male Students", "filter_male"),
-    ("🎯 Same Major / Year", "filter_major"),
+    ("Anyone (Fastest)", "filter_any"),
+    ("Female Students", "filter_female"),
+    ("Male Students", "filter_male"),
+    ("Same Major / Year", "filter_major"),
 ]
 
 # Telegram Sticker Pack Name (e.g. https://t.me/addstickers/FINDONEREAL)
