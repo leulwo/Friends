@@ -179,6 +179,7 @@ def get_filter_keyboard(current_filter: str = "filter_any") -> InlineKeyboardMar
     for label, code in FILTER_OPTIONS:
         prefix = "• " if code == current_filter else ""
         buttons.append([InlineKeyboardButton(f"{prefix}{label}", callback_data=f"apply_{code}")])
+    buttons.append([InlineKeyboardButton("⬅️ Back to Profile", callback_data="back_to_profile")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -737,18 +738,22 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"] = {}
     text = "<b>Step 1/9:</b> 👋 Welcome! What is your <b>First Name</b> or Nickname on campus?"
+    
+    reply_markup = ReplyKeyboardMarkup([[KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
+    
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text, parse_mode="HTML")
+        await update.callback_query.message.delete()
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode="HTML", reply_markup=reply_markup)
     else:
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
     return STATE_NAME
 
 async def back_to_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "<b>Step 1/9:</b> 👋 Welcome! What is your <b>First Name</b> or Nickname on campus?", 
         parse_mode="HTML", 
-        reply_markup=ReplyKeyboardRemove()
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
     )
     return STATE_NAME
 
@@ -785,7 +790,7 @@ async def back_to_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[KeyboardButton(g)] for g in GENDER_OPTIONS]
     keyboard.append([KeyboardButton("⬅️ Back")])
     await update.message.reply_text(
-        "<b>Step 2/9:</b> What is your <b>Gender</b>? (Used for match filtering)",
+        "<b>Step 3/9:</b> What is your <b>Gender</b>? (Used for match filtering)",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
@@ -953,6 +958,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=get_filter_keyboard(current_pref))
         return
 
+    elif data == "back_to_profile":
+        user = await db.get_user(user_id)
+        if not user:
+            await query.edit_message_text("No profile found.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Create Profile", callback_data="start_onboarding")]]))
+            return
+        card = format_profile_card(user, is_self=True)
+        keyboard = [
+            [InlineKeyboardButton("Edit Profile", callback_data="start_onboarding")],
+            [InlineKeyboardButton("Change Match Filters", callback_data="open_filter_menu")]
+        ]
+        await query.edit_message_text(card, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
     # 2. Apply a Filter and Search
     elif data.startswith("apply_"):
         filter_code = data.replace("apply_", "")
@@ -1103,7 +1121,10 @@ def main():
             CommandHandler("editprofile", start_onboarding)
         ],
         states={
-            STATE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_name)],
+            STATE_NAME: [
+                MessageHandler(filters.Regex(r"^(❌ Cancel Setup|Cancel|/cancel)$"), cancel_onboarding),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_name)
+            ],
             STATE_AGE: [
                 MessageHandler(filters.Regex(r"^⬅️ Back$"), back_to_name),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_age)
@@ -1137,7 +1158,7 @@ def main():
                 MessageHandler((filters.PHOTO | filters.TEXT) & ~filters.COMMAND, onboarding_photo)
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel_onboarding), MessageHandler(filters.Regex(r"^⬅️ Back$"), cancel_onboarding)],
+        fallbacks=[CommandHandler("cancel", cancel_onboarding), MessageHandler(filters.Regex(r"^⬅️ Back$"), cancel_onboarding), MessageHandler(filters.Regex(r"^❌ Cancel Setup$"), cancel_onboarding)],
     )
 
     app.add_handler(conv_handler)
