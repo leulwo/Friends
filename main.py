@@ -85,7 +85,7 @@ db = DatabaseManager(DATABASE_URL)
     STATE_YEAR,
     STATE_DORM,
     STATE_INTERESTS,
-    STATE_HANDLE
+    STATE_PHOTO
 ) = range(7)
 
 # ---------------------------------------------------------------------------
@@ -364,16 +364,15 @@ async def search_and_display_candidate(user_id: int, context: ContextTypes.DEFAU
         ]
     ]
 
-    if edit_message_id:
-        try:
-            await context.bot.edit_message_text(chat_id=user_id, message_id=edit_message_id, text=card_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-            return
-        except Exception:
-            pass
-
     # Clean old preview UI to keep chat screen clean
     await cleanup_user_ui(user_id, context)
-    sent = await context.bot.send_message(chat_id=user_id, text=card_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    photo_id = candidate.get("photo_id")
+    if photo_id:
+        sent = await context.bot.send_photo(chat_id=user_id, photo=photo_id, caption=card_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        sent = await context.bot.send_message(chat_id=user_id, text=card_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        
     track_ui_message(user_id, sent.message_id)
 
 
@@ -622,7 +621,11 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Edit Profile", callback_data="start_onboarding")],
         [InlineKeyboardButton("Change Match Filters", callback_data="open_filter_menu")]
     ]
-    sent = await update.message.reply_text(card, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    photo_id = p.get("photo_id")
+    if photo_id:
+        sent = await update.message.reply_photo(photo=photo_id, caption=card, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        sent = await update.message.reply_text(card, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     track_ui_message(user_id, sent.message_id)
 
 
@@ -791,22 +794,27 @@ async def onboarding_interests(update: Update, context: ContextTypes.DEFAULT_TYP
     interests = [x.strip() for x in raw.split(",") if x.strip()]
     context.user_data["onboarding"]["interests"] = interests
     
-    user = update.effective_user
-    default_handle = f"@{user.username}" if user.username else "Will share manually"
-
     await update.message.reply_text(
-        f"<b>Step 7/7:</b> What is your <b>Telegram Username or Social Handle</b>?\n\n"
-        f"This will be visible on your profile card so matches can connect with you.\n"
-        f"(Default: <code>{default_handle}</code> or type custom):",
+        f"<b>Step 7/7:</b> Upload a <b>Real Photo</b> of yourself!\n\n"
+        f"This helps build trust and makes finding matches better.\n"
+        f"(Send a photo, or type /skip to use no photo):",
         parse_mode="HTML"
     )
-    return STATE_HANDLE
+    return STATE_PHOTO
 
 
-async def onboarding_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    handle = update.message.text.strip()
-    context.user_data["onboarding"]["social_handle"] = handle
-    
+async def onboarding_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.photo:
+        # Get the highest resolution photo
+        photo_id = update.message.photo[-1].file_id
+        context.user_data["onboarding"]["photo_id"] = photo_id
+    else:
+        # If text is provided, we can assume it's /skip or they didn't send a photo
+        context.user_data["onboarding"]["photo_id"] = None
+        if update.message.text and update.message.text.lower() != '/skip':
+             await update.message.reply_text("Please send a photo, or type /skip.")
+             return STATE_PHOTO
+             
     user = update.effective_user
     data = context.user_data["onboarding"]
     data["user_id"] = user.id
@@ -1008,7 +1016,7 @@ def main():
             STATE_YEAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_year)],
             STATE_DORM: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_dorm)],
             STATE_INTERESTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_interests)],
-            STATE_HANDLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_handle)],
+            STATE_PHOTO: [MessageHandler((filters.PHOTO | filters.TEXT) & ~filters.COMMAND, onboarding_photo)],
         },
         fallbacks=[CommandHandler("cancel", cancel_onboarding)],
     )

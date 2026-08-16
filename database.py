@@ -50,6 +50,7 @@ class DatabaseManager:
                             interests TEXT DEFAULT '',
                             bio TEXT DEFAULT '',
                             social_handle TEXT,
+                            photo_id TEXT,
                             is_banned BOOLEAN DEFAULT FALSE,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             total_chats INT DEFAULT 0
@@ -73,6 +74,7 @@ class DatabaseManager:
                     try:
                         await conn.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS gender TEXT DEFAULT 'Not specified';")
                         await conn.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS preferred_gender TEXT DEFAULT 'Any';")
+                        await conn.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS photo_id TEXT;")
                     except Exception as err:
                         logger.debug(f"Schema alter notice (PG): {err}")
                 logger.info("Connected to PostgreSQL Database (Aiven/Cloud) successfully.")
@@ -96,6 +98,7 @@ class DatabaseManager:
                 interests TEXT DEFAULT '',
                 bio TEXT DEFAULT '',
                 social_handle TEXT,
+                photo_id TEXT,
                 is_banned INTEGER DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 total_chats INTEGER DEFAULT 0
@@ -122,6 +125,10 @@ class DatabaseManager:
             pass
         try:
             cur.execute("ALTER TABLE students ADD COLUMN preferred_gender TEXT DEFAULT 'Any';")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE students ADD COLUMN photo_id TEXT;")
         except Exception:
             pass
         conn.commit()
@@ -156,13 +163,14 @@ class DatabaseManager:
         dorm = data.get("dorm", "Campus")
         interests = ",".join(data.get("interests", [])) if isinstance(data.get("interests"), list) else data.get("interests", "")
         bio = data.get("bio", "Hey! Excited to meet people around campus.")
-        handle = data.get("social_handle", f"@{username}" if username else "Not shared")
+        handle = f"@{username}" if username else "Not shared"
+        photo_id = data.get("photo_id")
 
         if self.is_postgres and self.pg_pool:
             async with self.pg_pool.acquire() as conn:
                 await conn.execute("""
-                    INSERT INTO students (user_id, username, full_name, gender, preferred_gender, major, study_year, dorm, interests, bio, social_handle)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    INSERT INTO students (user_id, username, full_name, gender, preferred_gender, major, study_year, dorm, interests, bio, social_handle, photo_id)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     ON CONFLICT (user_id) DO UPDATE SET
                         username = EXCLUDED.username,
                         full_name = EXCLUDED.full_name,
@@ -173,15 +181,16 @@ class DatabaseManager:
                         dorm = EXCLUDED.dorm,
                         interests = EXCLUDED.interests,
                         bio = EXCLUDED.bio,
-                        social_handle = EXCLUDED.social_handle;
-                """, user_id, username, name, gender, preferred_gender, major, year, dorm, interests, bio, handle)
+                        social_handle = EXCLUDED.social_handle,
+                        photo_id = EXCLUDED.photo_id;
+                """, user_id, username, name, gender, preferred_gender, major, year, dorm, interests, bio, handle, photo_id)
         else:
             conn = sqlite3.connect(self.sqlite_file)
             cur = conn.cursor()
             cur.execute("""
-                INSERT OR REPLACE INTO students (user_id, username, full_name, gender, preferred_gender, major, study_year, dorm, interests, bio, social_handle)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (user_id, username, name, gender, preferred_gender, major, year, dorm, interests, bio, handle))
+                INSERT OR REPLACE INTO students (user_id, username, full_name, gender, preferred_gender, major, study_year, dorm, interests, bio, social_handle, photo_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, username, name, gender, preferred_gender, major, year, dorm, interests, bio, handle, photo_id))
             conn.commit()
             conn.close()
 
