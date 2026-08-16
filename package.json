@@ -2,8 +2,8 @@
   "name": "campus-stranger-bot",
   "version": "1.0.0",
   "scripts": {
-    "dev": "PORT=3000 python3 main.py",
-    "start": "PORT=3000 python3 main.py",
+    "dev": "python3 main.py",
+    "start": "python3 main.py",
     "build": "echo 'No build'"
   }
 }

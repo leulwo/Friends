@@ -736,7 +736,7 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 async def start_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"] = {}
-    text = "<b>Step 1/9:</b> What is your <b>First Name</b> or Nickname on campus?"
+    text = "<b>Step 1/9:</b> 👋 Welcome! What is your <b>First Name</b> or Nickname on campus?"
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(text, parse_mode="HTML")
@@ -746,7 +746,7 @@ async def start_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def back_to_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "<b>Step 1/9:</b> What is your <b>First Name</b> or Nickname on campus?", 
+        "<b>Step 1/9:</b> 👋 Welcome! What is your <b>First Name</b> or Nickname on campus?", 
         parse_mode="HTML", 
         reply_markup=ReplyKeyboardRemove()
     )
@@ -1083,16 +1083,17 @@ async def post_init(app: Application):
 
 
 def main():
+    import time
     """Start the bot."""
-    if not BOT_TOKEN:
+    start_health_server()
+    if not BOT_TOKEN or BOT_TOKEN == "mock":
         print("❌ ERROR: TELEGRAM_BOT_TOKEN environment variable is not set!")
         print("Please export TELEGRAM_BOT_TOKEN='your_token_from_botfather' in .env or your host.")
-        sys.exit(1)
+        print("Sleeping to keep the server alive so you can fix the token...")
+        while True:
+            time.sleep(60)
 
-    # Start health server for Render / Koyeb / Heroku / Cloud Run if PORT is set
-    start_health_server()
-
-    # Build Application
+    # Build Application# Build Application
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Onboarding Conversation
