@@ -32,7 +32,8 @@ from telegram import (
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
     KeyboardButton,
-    ReplyKeyboardRemove
+    ReplyKeyboardRemove,
+    InputFile
 )
 from telegram.ext import (
     Application,
@@ -164,7 +165,8 @@ def format_profile_card(student: dict, is_self: bool = False) -> str:
 
 async def send_asset_animation(chat_id: int, animation_key: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
-    Checks the /assets folder for a matching animation (TGS / Lottie, GIF, MP4) and sends it.
+    Checks the /assets folder for a matching animation (TGS / Lottie, GIF, MP4) and sends it
+    as an animated sticker or looping animation.
     Supported file extensions: .tgs (Telegram animated sticker), .gif, .mp4, .webp
     """
     assets_dir = os.path.join(os.path.dirname(__file__), "assets")
@@ -173,16 +175,23 @@ async def send_asset_animation(chat_id: int, animation_key: str, context: Contex
 
     extensions = [".tgs", ".gif", ".mp4", ".webp", ".png"]
     for ext in extensions:
-        candidate_path = os.path.join(assets_dir, f"{animation_key}{ext}")
+        filename = f"{animation_key}{ext}"
+        candidate_path = os.path.join(assets_dir, filename)
         if os.path.exists(candidate_path):
             try:
                 with open(candidate_path, "rb") as f:
-                    if ext == ".tgs":
-                        await context.bot.send_sticker(chat_id=chat_id, sticker=f)
-                    elif ext in [".gif", ".mp4"]:
-                        await context.bot.send_animation(chat_id=chat_id, animation=f)
-                    elif ext in [".webp", ".png"]:
-                        await context.bot.send_photo(chat_id=chat_id, photo=f)
+                    file_bytes = f.read()
+
+                if ext == ".tgs":
+                    # Send with InputFile and filename='sticker.tgs' so Telegram recognizes it as an animated vector sticker
+                    input_file = InputFile(file_bytes, filename="animation.tgs")
+                    await context.bot.send_sticker(chat_id=chat_id, sticker=input_file)
+                elif ext in [".gif", ".mp4"]:
+                    input_file = InputFile(file_bytes, filename=filename)
+                    await context.bot.send_animation(chat_id=chat_id, animation=input_file)
+                elif ext in [".webp", ".png"]:
+                    input_file = InputFile(file_bytes, filename=filename)
+                    await context.bot.send_photo(chat_id=chat_id, photo=input_file)
                 return True
             except Exception as e:
                 logger.warning(f"Could not send animation asset {candidate_path}: {e}")
