@@ -168,13 +168,14 @@ def format_profile_card(student: dict, is_self: bool = False) -> str:
 async def send_asset_animation(chat_id: int, animation_key: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
     Sends Telegram animated stickers (.tgs) either via configured STICKER_IDS file_id
-    or directly from /assets/{animation_key}.tgs.
+    or directly from /assets/{animation_key}.tgs (with alias & case-insensitive matching).
     """
     # 1. Check if a Telegram Sticker File ID is configured in STICKER_IDS
     sticker_id = STICKER_IDS.get(animation_key, "").strip()
     if sticker_id:
         try:
             await context.bot.send_sticker(chat_id=chat_id, sticker=sticker_id)
+            logger.info(f"Sent sticker by file_id for {animation_key} to {chat_id}")
             return True
         except Exception as e:
             logger.warning(f"Could not send sticker by file_id for {animation_key}: {e}")
@@ -184,18 +185,49 @@ async def send_asset_animation(chat_id: int, animation_key: str, context: Contex
     if not os.path.exists(assets_dir):
         return False
 
-    candidate_path = os.path.join(assets_dir, f"{animation_key}.tgs")
-    if os.path.exists(candidate_path):
-        try:
-            with open(candidate_path, "rb") as f:
-                file_bytes = f.read()
+    # Name variations / aliases for each animation key
+    aliases_map = {
+        "welcome": ["welcome.tgs", "Welcome.tgs"],
+        "chat_start": ["chat_start.tgs", "Chat.tgs", "chat.tgs", "Chat_start.tgs"],
+        "match_found": ["match_found.tgs", "Wave Animation.tgs", "wave.tgs", "Wave.tgs", "Match_found.tgs"],
+        "search": ["search.tgs", "Search.tgs"],
+        "loading": ["loading.tgs", "Loader animation.tgs", "Loader.tgs", "loader.tgs", "Loading.tgs"],
+        "bored_waiting": ["bored_waiting.tgs", "Loading Animation Bored Hand.tgs", "bored.tgs", "Bored.tgs"],
+        "car": ["car.tgs", "carr.tgs", "Car.tgs"]
+    }
 
-            input_file = InputFile(file_bytes, filename=f"{animation_key}.tgs")
-            await context.bot.send_sticker(chat_id=chat_id, sticker=input_file)
-            return True
-        except Exception as e:
-            logger.warning(f"Could not send .tgs sticker asset {candidate_path}: {e}")
-            return False
+    candidates = aliases_map.get(animation_key, [f"{animation_key}.tgs"])
+    
+    # Try exact match or alias match first
+    for candidate in candidates:
+        candidate_path = os.path.join(assets_dir, candidate)
+        if os.path.exists(candidate_path):
+            try:
+                with open(candidate_path, "rb") as f:
+                    file_bytes = f.read()
+                input_file = InputFile(file_bytes, filename=f"{animation_key}.tgs")
+                await context.bot.send_sticker(chat_id=chat_id, sticker=input_file)
+                logger.info(f"Successfully sent .tgs sticker {candidate} for {animation_key} to {chat_id}")
+                return True
+            except Exception as e:
+                logger.warning(f"Could not send .tgs sticker asset {candidate_path}: {e}")
+
+    # Fallback: Case-insensitive search in assets folder for any .tgs containing the key
+    try:
+        norm_key = animation_key.lower().replace("_", "")
+        for filename in os.listdir(assets_dir):
+            if filename.lower().endswith(".tgs"):
+                norm_file = filename.lower().replace("_", "").replace(" ", "")
+                if norm_key in norm_file or any(c.lower().replace("_", "").replace(" ", "") in norm_file for c in candidates):
+                    candidate_path = os.path.join(assets_dir, filename)
+                    with open(candidate_path, "rb") as f:
+                        file_bytes = f.read()
+                    input_file = InputFile(file_bytes, filename=f"{animation_key}.tgs")
+                    await context.bot.send_sticker(chat_id=chat_id, sticker=input_file)
+                    logger.info(f"Successfully sent fallback .tgs sticker {filename} for {animation_key} to {chat_id}")
+                    return True
+    except Exception as e:
+        logger.warning(f"Fallback .tgs search error for {animation_key}: {e}")
 
     return False
 
