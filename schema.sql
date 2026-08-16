@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS students (
     user_id BIGINT PRIMARY KEY,
     username TEXT,
     full_name TEXT NOT NULL,
+    gender TEXT DEFAULT 'Not specified',
+    preferred_gender TEXT DEFAULT 'Any',
     major TEXT DEFAULT 'Undeclared',
     study_year TEXT DEFAULT 'Undergraduate',
     dorm TEXT DEFAULT 'Campus',

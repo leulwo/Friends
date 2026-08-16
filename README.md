@@ -82,14 +82,35 @@ python main.py
 
 ## 🛠️ Bot Commands & Features
 
-- **`/start`** — Welcome screen and guided 20-second student profile builder (Major, Year, Dorm, Interests, Social Handle).
-- **`/find`** — Join the queue and pair with another student anonymously.
-- **`/next`** — Skip to the next student instantly.
-- **`/stop`** — End the active chat or leave the queue.
-- **`/reveal`** — Mutually exchange student profile cards and Telegram/IG handles (only shared when both students agree).
+- **`/start`** — Welcome screen and guided student profile setup (Name, Gender, Major, Year, Dorm, Interests, Telegram handle).
+- **`/find` or `/filters`** — Open the match filter menu (✨ Anyone, 👩 Female Students, 👨 Male Students, 🎯 Same Major/Year).
+- **Profile Preview Card** — Before connecting, the bot displays the matched student's full profile:
+  - 👤 Full Name / Nickname
+  - ⚧ Gender (Female, Male, Non-binary)
+  - 📚 Major & Academic Year
+  - 🏢 Campus / Dorm
+  - ✨ Interests & Hobbies
+  - 📝 Bio
+  - 🔗 Telegram Handle (`@username`)
+  - 📊 Campus Chats count
+- **`[💬 Start Chatting]` Button** — One-tap 1-on-1 direct & bot-relayed chatting session.
+- **`[⏭️ Next Candidate]` Button** — Browse to the next student matching your filter.
+- **`/next`** — Skip to the next match during an active conversation.
+- **`/stop`** — End the active 1-on-1 chat session.
 - **`/meet`** — Suggest a random campus spot (Library lounge, Quad, Cafe) with an icebreaker prompt.
+- **`/profile`** — View and edit your student profile and matching preferences.
 - **`/report`** — Report and permanently block an inappropriate user.
-- **`/profile`** — View and edit student details.
+
+---
+
+## 🎨 Integrated Animated Vector Stickers (`.tgs` / Lottie)
+
+The bot now features dynamic animated vector stickers that play automatically during key interactions:
+- 🔍 `assets/search.tgs` — Animated magnifying glass & radar pulse while searching and filtering.
+- 🌊 `assets/match_found.tgs` — Friendly waving animation when a candidate profile is discovered.
+- 💬 `assets/chat_start.tgs` — High-energy chat connection animation when tapping `[💬 Start Chatting]`.
+- 👋 `assets/welcome.tgs` — Welcome campus greeting sticker when running `/start` or finishing profile setup.
+- ⏳ `assets/loading.tgs` & `assets/bored_waiting.tgs` — Smooth waiting & idle animations.
 
 ---
 
@@ -97,9 +118,10 @@ python main.py
 
 | File | Description |
 |---|---|
-| `main.py` | Main Telegram Bot runtime, queue matching engine, anonymous message relay, and cloud health check |
-| `database.py` | PostgreSQL connection pool (Neon / Supabase) with SQLite fallback |
-| `config.py` | Campus locations, icebreakers, interest list, and defaults |
+| `main.py` | Main Telegram Bot runtime, filter engine, candidate cards, Lottie `.tgs` animation triggers |
+| `database.py` | Aiven.io / PostgreSQL connection pool with SSL handling & SQLite fallback |
+| `assets/` | Animated vector sticker illustrations (`.tgs`, `.gif`, `.mp4`) |
+| `config.py` | Campus locations, icebreakers, interest lists, gender filters |
 | `requirements.txt` | Python packages (`python-telegram-bot`, `asyncpg`, `aiohttp`, etc.) |
 | `render.yaml` | Render Blueprint deployment config |
 | `Procfile` | Cloud process specification (`web` and `worker`) |

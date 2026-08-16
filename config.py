@@ -37,3 +37,13 @@ INTERESTS_LIST = [
 ]
 
 YEAR_OPTIONS = ["Freshman (1st)", "Sophomore (2nd)", "Junior (3rd)", "Senior (4th)", "Grad / Master / PhD"]
+
+GENDER_OPTIONS = ["👨 Male", "👩 Female", "🌈 Non-Binary / Other", "🤐 Prefer not to say"]
+
+FILTER_OPTIONS = [
+    ("✨ Anyone (Fastest)", "filter_any"),
+    ("👩 Female Students", "filter_female"),
+    ("👨 Male Students", "filter_male"),
+    ("🎯 Same Major / Year", "filter_major"),
+]
+

@@ -1,6 +1,7 @@
 import logging
 import sqlite3
-from typing import Optional
+import random
+from typing import Optional, List, Set
 
 try:
     import asyncpg
@@ -32,7 +33,6 @@ class DatabaseManager:
                     ssl_ctx = ssl.create_default_context()
                     ssl_ctx.check_hostname = False
                     ssl_ctx.verify_mode = ssl.CERT_NONE
-                    # Remove query params that asyncpg might choke on
                     base_url = fixed_url.split("?")[0]
                     self.pg_pool = await asyncpg.create_pool(base_url, ssl=ssl_ctx, max_size=10)
 
@@ -42,11 +42,13 @@ class DatabaseManager:
                             user_id BIGINT PRIMARY KEY,
                             username TEXT,
                             full_name TEXT,
-                            major TEXT,
-                            study_year TEXT,
-                            dorm TEXT,
-                            interests TEXT,
-                            bio TEXT,
+                            gender TEXT DEFAULT 'Not specified',
+                            preferred_gender TEXT DEFAULT 'Any',
+                            major TEXT DEFAULT 'Undeclared',
+                            study_year TEXT DEFAULT 'Undergrad',
+                            dorm TEXT DEFAULT 'Campus',
+                            interests TEXT DEFAULT '',
+                            bio TEXT DEFAULT '',
                             social_handle TEXT,
                             is_banned BOOLEAN DEFAULT FALSE,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -67,6 +69,12 @@ class DatabaseManager:
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         );
                     """)
+                    # Alter table if existing from older schema
+                    try:
+                        await conn.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS gender TEXT DEFAULT 'Not specified';")
+                        await conn.execute("ALTER TABLE students ADD COLUMN IF NOT EXISTS preferred_gender TEXT DEFAULT 'Any';")
+                    except Exception as err:
+                        logger.debug(f"Schema alter notice (PG): {err}")
                 logger.info("Connected to PostgreSQL Database (Aiven/Cloud) successfully.")
                 return
             except Exception as e:
@@ -80,11 +88,13 @@ class DatabaseManager:
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
                 full_name TEXT,
-                major TEXT,
-                study_year TEXT,
-                dorm TEXT,
-                interests TEXT,
-                bio TEXT,
+                gender TEXT DEFAULT 'Not specified',
+                preferred_gender TEXT DEFAULT 'Any',
+                major TEXT DEFAULT 'Undeclared',
+                study_year TEXT DEFAULT 'Undergrad',
+                dorm TEXT DEFAULT 'Campus',
+                interests TEXT DEFAULT '',
+                bio TEXT DEFAULT '',
                 social_handle TEXT,
                 is_banned INTEGER DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -105,6 +115,15 @@ class DatabaseManager:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        # Safe migration for existing SQLite DBs
+        try:
+            cur.execute("ALTER TABLE students ADD COLUMN gender TEXT DEFAULT 'Not specified';")
+        except Exception:
+            pass
+        try:
+            cur.execute("ALTER TABLE students ADD COLUMN preferred_gender TEXT DEFAULT 'Any';")
+        except Exception:
+            pass
         conn.commit()
         conn.close()
         logger.info(f"Initialized SQLite Database at {self.sqlite_file}.")
@@ -129,9 +148,11 @@ class DatabaseManager:
         """Save or update student profile."""
         user_id = data["user_id"]
         username = data.get("username", "")
-        name = data.get("name", "Fellow Student")
+        name = data.get("name") or data.get("full_name") or "Fellow Student"
+        gender = data.get("gender", "Not specified")
+        preferred_gender = data.get("preferred_gender", "Any")
         major = data.get("major", "Undeclared")
-        year = data.get("year", "Undergrad")
+        year = data.get("year") or data.get("study_year") or "Undergrad"
         dorm = data.get("dorm", "Campus")
         interests = ",".join(data.get("interests", [])) if isinstance(data.get("interests"), list) else data.get("interests", "")
         bio = data.get("bio", "Hey! Excited to meet people around campus.")
@@ -140,27 +161,102 @@ class DatabaseManager:
         if self.is_postgres and self.pg_pool:
             async with self.pg_pool.acquire() as conn:
                 await conn.execute("""
-                    INSERT INTO students (user_id, username, full_name, major, study_year, dorm, interests, bio, social_handle)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    INSERT INTO students (user_id, username, full_name, gender, preferred_gender, major, study_year, dorm, interests, bio, social_handle)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     ON CONFLICT (user_id) DO UPDATE SET
                         username = EXCLUDED.username,
                         full_name = EXCLUDED.full_name,
+                        gender = EXCLUDED.gender,
+                        preferred_gender = EXCLUDED.preferred_gender,
                         major = EXCLUDED.major,
                         study_year = EXCLUDED.study_year,
                         dorm = EXCLUDED.dorm,
                         interests = EXCLUDED.interests,
                         bio = EXCLUDED.bio,
                         social_handle = EXCLUDED.social_handle;
-                """, user_id, username, name, major, year, dorm, interests, bio, handle)
+                """, user_id, username, name, gender, preferred_gender, major, year, dorm, interests, bio, handle)
         else:
             conn = sqlite3.connect(self.sqlite_file)
             cur = conn.cursor()
             cur.execute("""
-                INSERT OR REPLACE INTO students (user_id, username, full_name, major, study_year, dorm, interests, bio, social_handle)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (user_id, username, name, major, year, dorm, interests, bio, handle))
+                INSERT OR REPLACE INTO students (user_id, username, full_name, gender, preferred_gender, major, study_year, dorm, interests, bio, social_handle)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, username, name, gender, preferred_gender, major, year, dorm, interests, bio, handle))
             conn.commit()
             conn.close()
+
+    async def update_preference(self, user_id: int, preferred_gender: str):
+        """Update student's preferred matching filter."""
+        if self.is_postgres and self.pg_pool:
+            async with self.pg_pool.acquire() as conn:
+                await conn.execute("UPDATE students SET preferred_gender = $1 WHERE user_id = $2", preferred_gender, user_id)
+        else:
+            conn = sqlite3.connect(self.sqlite_file)
+            cur = conn.cursor()
+            cur.execute("UPDATE students SET preferred_gender = ? WHERE user_id = ?", (preferred_gender, user_id))
+            conn.commit()
+            conn.close()
+
+    async def find_candidates(self, user_id: int, gender_filter: str = "Any", exclude_ids: Optional[Set[int]] = None) -> List[dict]:
+        """Find candidate student profiles matching the chosen filter."""
+        exclude_list = list(exclude_ids or set())
+        if user_id not in exclude_list:
+            exclude_list.append(user_id)
+
+        rows = []
+        if self.is_postgres and self.pg_pool:
+            async with self.pg_pool.acquire() as conn:
+                if gender_filter and gender_filter not in ("Any", "Anyone", "All"):
+                    query = """
+                        SELECT * FROM students 
+                        WHERE is_banned = FALSE 
+                          AND user_id != ALL($1) 
+                          AND gender ILIKE $2
+                        ORDER BY total_chats ASC, RANDOM()
+                        LIMIT 20
+                    """
+                    records = await conn.fetch(query, exclude_list, f"%{gender_filter}%")
+                else:
+                    query = """
+                        SELECT * FROM students 
+                        WHERE is_banned = FALSE 
+                          AND user_id != ALL($1)
+                        ORDER BY total_chats ASC, RANDOM()
+                        LIMIT 20
+                    """
+                    records = await conn.fetch(query, exclude_list)
+                rows = [dict(r) for r in records]
+        else:
+            conn = sqlite3.connect(self.sqlite_file)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            placeholders = ",".join(["?"] * len(exclude_list))
+            
+            if gender_filter and gender_filter not in ("Any", "Anyone", "All"):
+                query = f"""
+                    SELECT * FROM students 
+                    WHERE is_banned = 0 
+                      AND user_id NOT IN ({placeholders})
+                      AND gender LIKE ?
+                    ORDER BY total_chats ASC, RANDOM()
+                    LIMIT 20
+                """
+                params = list(exclude_list) + [f"%{gender_filter}%"]
+                cur.execute(query, params)
+            else:
+                query = f"""
+                    SELECT * FROM students 
+                    WHERE is_banned = 0 
+                      AND user_id NOT IN ({placeholders})
+                    ORDER BY total_chats ASC, RANDOM()
+                    LIMIT 20
+                """
+                cur.execute(query, exclude_list)
+            records = cur.fetchall()
+            rows = [dict(r) for r in records]
+            conn.close()
+
+        return rows
 
     async def increment_chat_count(self, user1: int, user2: int):
         """Update student stats."""

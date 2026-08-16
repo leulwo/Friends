@@ -1,16 +1,17 @@
 """
 =============================================================================
-🏛️ CAMPUS STRANGER / FRIEND FINDER TELEGRAM BOT (OMEGLE-STYLE)
-Built with: python-telegram-bot v20+ (Async), asyncpg / sqlite3, aiohttp
+🏛️ CAMPUS STRANGER & FRIEND FINDER TELEGRAM BOT
+Built with: python-telegram-bot v20+ (Async), Aiven.io / PostgreSQL / SQLite
 =============================================================================
 Features:
-- Anonymous 1-on-1 chatting between campus students
-- Queue matching with common interest discovery
-- Safe profile reveal system (both must agree before sharing handles)
+- Filter-based matchmaking (Gender: Female, Male, Anyone, Same Major/Hobbies)
+- Rich candidate profile previews with full bio & username before chatting
+- "Start Chatting" one-tap 1-on-1 direct & anonymous message bridge
+- Full multimedia relay (Photos, Voice Notes, Videos, Stickers, GIFs, Docs)
 - Campus meetup spot suggestions & icebreakers (/meet)
-- Fast skip (/next) and disconnect (/stop)
-- Student safety: report & instant block system (/report)
-- Database: Free Neon / Supabase PostgreSQL with SQLite automatic fallback
+- Profile customization and edit flow (/profile, /start)
+- Safety reporting & permanent block system (/report)
+- Cloud health check server for 24/7 Render / Cloud hosting
 =============================================================================
 """
 
@@ -19,10 +20,9 @@ import sys
 import logging
 import asyncio
 import random
-import sqlite3
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Optional, Dict, Set, Tuple
+from typing import Optional, Dict, Set, List
 from datetime import datetime
 
 # Telegram Bot Imports
@@ -45,12 +45,19 @@ from telegram.ext import (
     filters
 )
 
-# Optional asyncpg for PostgreSQL (Neon, Supabase, Render, Railway, etc.)
-try:
-    import asyncpg
-    HAS_ASYNCPG = True
-except ImportError:
-    HAS_ASYNCPG = False
+from config import (
+    BOT_TOKEN,
+    DATABASE_URL,
+    ADMIN_USER_ID,
+    UNIVERSITY_NAME,
+    CAMPUS_SPOTS,
+    ICEBREAKERS,
+    INTERESTS_LIST,
+    YEAR_OPTIONS,
+    GENDER_OPTIONS,
+    FILTER_OPTIONS
+)
+from database import DatabaseManager
 
 # ---------------------------------------------------------------------------
 # LOGGING CONFIGURATION
@@ -61,329 +68,278 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# CONFIGURATION & ENVIRONMENT VARIABLES
-# ---------------------------------------------------------------------------
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
-UNIVERSITY_NAME = os.getenv("UNIVERSITY_NAME", "Campus")
-
-# List of physical campus spots for meetup suggestions
-CAMPUS_SPOTS = [
-    "Student Union Cafe",
-    "Main Library 2nd Floor Lounge",
-    "Campus Green / Quad Bench",
-    "Engineering Hall Atrium",
-    "Campus Coffee Shop",
-    "Dorm Courtyard",
-    "Recreation Center Plaza",
-    "Science Building Breezeway"
-]
-
-ICEBREAKERS = [
-    "What's your favorite study spot on campus when you actually need to focus?",
-    "What's the best cheap food spot near campus?",
-    "What's the hardest class you've taken here so far?",
-    "Are you a morning lecture person or an 8 PM library grinder?",
-    "If you could change one thing about our campus, what would it be?",
-    "What's your go-to caffeine order during finals week?",
-    "Which professor here has the most chaotic energy?",
-    "Are you involved in any campus clubs or sports?",
-    "What's the most underrated spot on campus?",
-    "What is your dream post-grad career?"
-]
-
-INTERESTS_LIST = [
-    "☕ Coffee & Boba", "💻 Coding & Tech", "🎮 Gaming & Esports",
-    "📚 Study Buddy", "🏋️ Gym & Fitness", "🎨 Art & Design",
-    "🎵 Music & Concerts", "🍜 Foodies", "🍿 Movies & Anime",
-    "🌿 Outdoors & Hiking", "📸 Photography", "⚽ Campus Sports"
-]
-
-YEAR_OPTIONS = ["Freshman (1st)", "Sophomore (2nd)", "Junior (3rd)", "Senior (4th)", "Grad / Master / PhD"]
+# Initialize Database Manager (Aiven / Neon / Supabase PostgreSQL or SQLite)
+db = DatabaseManager(DATABASE_URL)
 
 # ---------------------------------------------------------------------------
 # CONVERSATION STATES (FOR ONBOARDING PROFILE SETUP)
 # ---------------------------------------------------------------------------
-STATE_NAME, STATE_MAJOR, STATE_YEAR, STATE_DORM, STATE_INTERESTS, STATE_HANDLE = range(6)
+(
+    STATE_NAME,
+    STATE_GENDER,
+    STATE_MAJOR,
+    STATE_YEAR,
+    STATE_DORM,
+    STATE_INTERESTS,
+    STATE_HANDLE
+) = range(7)
 
 # ---------------------------------------------------------------------------
-# IN-MEMORY ACTIVE CHAT ROUTER & MATCHING QUEUE
+# IN-MEMORY ACTIVE STATE
 # ---------------------------------------------------------------------------
-# Active matches: user_id -> partner_id
+# Active 1-on-1 matches: user_id -> partner_id
 active_chats: Dict[int, int] = {}
-# Waiting queue of user_ids
-waiting_queue: Set[int] = set()
-# Reveal proposals: user_id -> set of agreed user_ids
-reveal_requests: Dict[int, Set[int]] = {}
-# Blocklist: user_id -> set of blocked partner_ids
+# Waiting queue for live instant matching: user_id -> desired_filter
+waiting_queue: Dict[int, str] = {}
+# Seen / browsed candidates in current session: user_id -> set of candidate_ids
+viewed_candidates: Dict[int, Set[int]] = {}
+# Blocked pairs: user_id -> set of blocked partner_ids
 blocked_pairs: Dict[int, Set[int]] = {}
+# Current active candidate preview: user_id -> candidate_id
+current_previews: Dict[int, int] = {}
 
-
-# ---------------------------------------------------------------------------
-# DATABASE MANAGER (PostgreSQL & SQLite Seamless Support)
-# ---------------------------------------------------------------------------
-class DatabaseManager:
-    def __init__(self, db_url: str):
-        self.db_url = db_url
-        self.is_postgres = db_url.startswith("postgres://") or db_url.startswith("postgresql://")
-        self.pg_pool = None
-        self.sqlite_file = "campus_bot.db"
-
-    async def init_db(self):
-        """Initialize database schema on startup."""
-        if self.is_postgres and HAS_ASYNCPG:
-            try:
-                fixed_url = self.db_url.replace("postgres://", "postgresql://")
-                self.pg_pool = await asyncpg.create_pool(fixed_url, max_size=10)
-                async with self.pg_pool.acquire() as conn:
-                    await conn.execute("""
-                        CREATE TABLE IF NOT EXISTS students (
-                            user_id BIGINT PRIMARY KEY,
-                            username TEXT,
-                            full_name TEXT,
-                            major TEXT,
-                            study_year TEXT,
-                            dorm TEXT,
-                            interests TEXT,
-                            bio TEXT,
-                            social_handle TEXT,
-                            is_banned BOOLEAN DEFAULT FALSE,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            total_chats INT DEFAULT 0
-                        );
-                        CREATE TABLE IF NOT EXISTS chat_logs (
-                            id SERIAL PRIMARY KEY,
-                            user_1 BIGINT,
-                            user_2 BIGINT,
-                            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            ended_at TIMESTAMP
-                        );
-                        CREATE TABLE IF NOT EXISTS reports (
-                            id SERIAL PRIMARY KEY,
-                            reporter_id BIGINT,
-                            reported_id BIGINT,
-                            reason TEXT,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        );
-                    """)
-                logger.info(" Connected to PostgreSQL Database successfully.")
-                return
-            except Exception as e:
-                logger.error(f" PostgreSQL connection failed: {e}. Falling back to SQLite.")
-                self.is_postgres = False
-
-        # SQLite Fallback
-        conn = sqlite3.connect(self.sqlite_file)
-        cur = conn.cursor()
-        cur.executescript("""
-            CREATE TABLE IF NOT EXISTS students (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                full_name TEXT,
-                major TEXT,
-                study_year TEXT,
-                dorm TEXT,
-                interests TEXT,
-                bio TEXT,
-                social_handle TEXT,
-                is_banned INTEGER DEFAULT 0,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                total_chats INTEGER DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS chat_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_1 INTEGER,
-                user_2 INTEGER,
-                started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                ended_at DATETIME
-            );
-            CREATE TABLE IF NOT EXISTS reports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                reporter_id INTEGER,
-                reported_id INTEGER,
-                reason TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        conn.commit()
-        conn.close()
-        logger.info(f" Initialized SQLite Database at {self.sqlite_file}.")
-
-    async def get_user(self, user_id: int) -> Optional[dict]:
-        """Fetch student profile by telegram user_id."""
-        if self.is_postgres and self.pg_pool:
-            async with self.pg_pool.acquire() as conn:
-                row = await conn.fetchrow("SELECT * FROM students WHERE user_id = $1", user_id)
-                return dict(row) if row else None
-        else:
-            conn = sqlite3.connect(self.sqlite_file)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute("SELECT * FROM students WHERE user_id = ?", (user_id,))
-            row = cur.fetchone()
-            res = dict(row) if row else None
-            conn.close()
-            return res
-
-    async def save_user(self, data: dict):
-        """Save or update student profile."""
-        user_id = data["user_id"]
-        username = data.get("username", "")
-        name = data.get("name", "Fellow Student")
-        major = data.get("major", "Undeclared")
-        year = data.get("year", "Undergrad")
-        dorm = data.get("dorm", "Campus")
-        interests = ",".join(data.get("interests", [])) if isinstance(data.get("interests"), list) else data.get("interests", "")
-        bio = data.get("bio", "Hey! Excited to meet people around campus.")
-        handle = data.get("social_handle", f"@{username}" if username else "Not shared")
-
-        if self.is_postgres and self.pg_pool:
-            async with self.pg_pool.acquire() as conn:
-                await conn.execute("""
-                    INSERT INTO students (user_id, username, full_name, major, study_year, dorm, interests, bio, social_handle)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                    ON CONFLICT (user_id) DO UPDATE SET
-                        username = EXCLUDED.username,
-                        full_name = EXCLUDED.full_name,
-                        major = EXCLUDED.major,
-                        study_year = EXCLUDED.study_year,
-                        dorm = EXCLUDED.dorm,
-                        interests = EXCLUDED.interests,
-                        bio = EXCLUDED.bio,
-                        social_handle = EXCLUDED.social_handle;
-                """, user_id, username, name, major, year, dorm, interests, bio, handle)
-        else:
-            conn = sqlite3.connect(self.sqlite_file)
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT OR REPLACE INTO students (user_id, username, full_name, major, study_year, dorm, interests, bio, social_handle)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (user_id, username, name, major, year, dorm, interests, bio, handle))
-            conn.commit()
-            conn.close()
-
-    async def increment_chat_count(self, user1: int, user2: int):
-        """Update student stats."""
-        if self.is_postgres and self.pg_pool:
-            async with self.pg_pool.acquire() as conn:
-                await conn.execute("UPDATE students SET total_chats = total_chats + 1 WHERE user_id IN ($1, $2)", user1, user2)
-                await conn.execute("INSERT INTO chat_logs (user_1, user_2) VALUES ($1, $2)", user1, user2)
-        else:
-            conn = sqlite3.connect(self.sqlite_file)
-            cur = conn.cursor()
-            cur.execute("UPDATE students SET total_chats = total_chats + 1 WHERE user_id IN (?, ?)", (user1, user2))
-            cur.execute("INSERT INTO chat_logs (user_1, user_2) VALUES (?, ?)", (user1, user2))
-            conn.commit()
-            conn.close()
-
-    async def log_report(self, reporter_id: int, reported_id: int, reason: str):
-        """Log safety report."""
-        if self.is_postgres and self.pg_pool:
-            async with self.pg_pool.acquire() as conn:
-                await conn.execute("INSERT INTO reports (reporter_id, reported_id, reason) VALUES ($1, $2, $3)", reporter_id, reported_id, reason)
-        else:
-            conn = sqlite3.connect(self.sqlite_file)
-            cur = conn.cursor()
-            cur.execute("INSERT INTO reports (reporter_id, reported_id, reason) VALUES (?, ?, ?)", (reporter_id, reported_id, reason))
-            conn.commit()
-            conn.close()
-
-
-db = DatabaseManager(DATABASE_URL)
 
 # ---------------------------------------------------------------------------
 # UI KEYBOARDS & HELPERS
 # ---------------------------------------------------------------------------
 def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
-    """Persistent action buttons while in the main menu."""
+    """Persistent action buttons in the main menu."""
     keyboard = [
-        [KeyboardButton("🔍 Find Campus Stranger"), KeyboardButton("👤 My Student Profile")],
-        [KeyboardButton("🎯 Common Interest Match"), KeyboardButton("❓ Help & Rules")]
+        [KeyboardButton("🔍 Find Campus Match"), KeyboardButton("🎯 Gender & Filters")],
+        [KeyboardButton("👤 My Student Profile"), KeyboardButton("❓ Help & Rules")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 
 def get_in_chat_keyboard() -> ReplyKeyboardMarkup:
-    """Action buttons while connected to a stranger."""
+    """Action buttons while in an active 1-on-1 conversation."""
     keyboard = [
-        [KeyboardButton("⏭️ Next Stranger"), KeyboardButton("🛑 End Chat")],
-        [KeyboardButton("🤝 Reveal Profile / Swap Socials"), KeyboardButton("📍 Suggest Campus Spot")]
+        [KeyboardButton("⏭️ Next Match"), KeyboardButton("🛑 End Chat")],
+        [KeyboardButton("📍 Suggest Campus Spot"), KeyboardButton("🛡️ Report User")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# ---------------------------------------------------------------------------
-# MATCHING ENGINE
-# ---------------------------------------------------------------------------
-async def match_user(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Try to pair user_id with another student waiting in the queue."""
-    user_blocks = blocked_pairs.get(user_id, set())
 
-    # Find candidates not blocked and not self
-    candidates = [uid for uid in waiting_queue if uid != user_id and uid not in user_blocks and user_id not in blocked_pairs.get(uid, set())]
+def get_filter_keyboard(current_filter: str = "filter_any") -> InlineKeyboardMarkup:
+    """Filter selector keyboard."""
+    buttons = []
+    for label, code in FILTER_OPTIONS:
+        prefix = "✅ " if code == current_filter else ""
+        buttons.append([InlineKeyboardButton(f"{prefix}{label}", callback_data=f"apply_{code}")])
+    return InlineKeyboardMarkup(buttons)
 
-    if not candidates:
-        waiting_queue.add(user_id)
+
+def format_profile_card(student: dict, is_self: bool = False) -> str:
+    """Format student details into an attractive profile card."""
+    name = student.get("full_name") or student.get("name") or "Campus Student"
+    gender = student.get("gender") or "Not specified"
+    major = student.get("major") or "Undeclared"
+    year = student.get("study_year") or student.get("year") or "Undergraduate"
+    dorm = student.get("dorm") or "Campus"
+    interests = student.get("interests") or "Not added yet"
+    bio = student.get("bio") or "Looking to meet cool people around campus!"
+    handle = student.get("social_handle")
+    username = student.get("username")
+    
+    if not handle:
+        handle = f"@{username}" if username else "Will share during chat"
+    
+    chats_count = student.get("total_chats", 0)
+
+    header = "👤 <b>YOUR STUDENT PROFILE</b>" if is_self else "🎉 <b>CAMPUS MATCH FOUND!</b>"
+
+    card = (
+        f"{header} 🎓\n\n"
+        f"👤 <b>Name:</b> {name}\n"
+        f"⚧ <b>Gender:</b> {gender}\n"
+        f"📚 <b>Major:</b> {major} ({year})\n"
+        f"🏢 <b>Dorm / Area:</b> {dorm}\n"
+        f"✨ <b>Interests:</b> {interests}\n"
+        f"📝 <b>Bio:</b> <i>\"{bio}\"</i>\n"
+        f"🔗 <b>Telegram Handle:</b> <code>{handle}</code>\n"
+        f"📊 <b>Campus Chats:</b> {chats_count} chats\n"
+    )
+    return card
+
+
+async def send_asset_animation(chat_id: int, animation_key: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Checks the /assets folder for a matching animation (TGS / Lottie, GIF, MP4) and sends it.
+    Supported file extensions: .tgs (Telegram animated sticker), .gif, .mp4, .webp
+    """
+    assets_dir = os.path.join(os.path.dirname(__file__), "assets")
+    if not os.path.exists(assets_dir):
         return False
 
-    # Pick a partner
-    partner_id = random.choice(candidates)
-    waiting_queue.remove(partner_id)
+    extensions = [".tgs", ".gif", ".mp4", ".webp", ".png"]
+    for ext in extensions:
+        candidate_path = os.path.join(assets_dir, f"{animation_key}{ext}")
+        if os.path.exists(candidate_path):
+            try:
+                with open(candidate_path, "rb") as f:
+                    if ext == ".tgs":
+                        await context.bot.send_sticker(chat_id=chat_id, sticker=f)
+                    elif ext in [".gif", ".mp4"]:
+                        await context.bot.send_animation(chat_id=chat_id, animation=f)
+                    elif ext in [".webp", ".png"]:
+                        await context.bot.send_photo(chat_id=chat_id, photo=f)
+                return True
+            except Exception as e:
+                logger.warning(f"Could not send animation asset {candidate_path}: {e}")
+                return False
+    return False
 
-    # Establish bidirectional link
-    active_chats[user_id] = partner_id
-    active_chats[partner_id] = user_id
 
-    # Reset reveal requests for both
-    reveal_requests[user_id] = set()
-    reveal_requests[partner_id] = set()
-
-    # Fetch user profiles to find common ground
-    p1 = await db.get_user(user_id)
-    p2 = await db.get_user(partner_id)
-
-    common_interests = []
-    if p1 and p2 and p1.get("interests") and p2.get("interests"):
-        i1 = set([x.strip() for x in p1["interests"].split(",") if x.strip()])
-        i2 = set([x.strip() for x in p2["interests"].split(",") if x.strip()])
-        common_interests = list(i1.intersection(i2))
-
-    # Shared greeting info
-    info_text = f"🎉 <b>Connected to a fellow {UNIVERSITY_NAME} student!</b>\n\n"
-    if common_interests:
-        info_text += f"✨ <i>Common interests:</i> {', '.join(common_interests)}\n"
-    else:
-        info_text += "💬 Say hello and break the ice! Everything is anonymous until you both choose to reveal.\n"
-    
-    info_text += "\n<i>Tip: Tap [🤝 Reveal Profile] when you want to exchange Telegram/IG handles and meet up on campus!</i>"
-
-    # Send notifications to both
-    try:
+# ---------------------------------------------------------------------------
+# MATCHMAKING ENGINE
+# ---------------------------------------------------------------------------
+async def search_and_display_candidate(user_id: int, context: ContextTypes.DEFAULT_TYPE, filter_code: str = "filter_any", edit_message_id: Optional[int] = None):
+    """Search for a candidate matching user's filter and display their profile with 'Start Chatting'."""
+    user = await db.get_user(user_id)
+    if not user:
         await context.bot.send_message(
             chat_id=user_id,
-            text=info_text,
-            parse_mode="HTML",
-            reply_markup=get_in_chat_keyboard()
+            text="⚠️ Please create your student profile first with /start or /profile!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 Create Profile", callback_data="start_onboarding")]])
         )
-    except Exception as e:
-        logger.error(f"Failed to send match alert to {user_id}: {e}")
+        return
+
+    # Determine gender keyword for query
+    gender_filter = "Any"
+    if filter_code == "filter_female":
+        gender_filter = "Female"
+    elif filter_code == "filter_male":
+        gender_filter = "Male"
+
+    # Get list of excluded IDs (self + blocked + already viewed this session)
+    seen = viewed_candidates.setdefault(user_id, set())
+    user_blocks = blocked_pairs.get(user_id, set())
+    exclude_ids = seen.union(user_blocks).union({user_id})
+
+    # Fetch candidates matching filter
+    candidates = await db.find_candidates(user_id, gender_filter=gender_filter, exclude_ids=exclude_ids)
+
+    # If all candidates seen, reset session cache to allow cycling through again
+    if not candidates and len(seen) > 0:
+        viewed_candidates[user_id] = set()
+        exclude_ids = user_blocks.union({user_id})
+        candidates = await db.find_candidates(user_id, gender_filter=gender_filter, exclude_ids=exclude_ids)
+
+    if not candidates:
+        filter_label = "Female" if filter_code == "filter_female" else ("Male" if filter_code == "filter_male" else "any")
+        text = (
+            f"🔍 <b>No other {filter_label} students found at this exact moment.</b>\n\n"
+            f"Would you like to search with broader filters or try again?"
+        )
+        keyboard = [
+            [InlineKeyboardButton("✨ Search Anyone (All Students)", callback_data="apply_filter_any")],
+            [InlineKeyboardButton("🔄 Refresh / Try Again", callback_data=f"apply_{filter_code}")],
+            [InlineKeyboardButton("⚙️ Change Filter", callback_data="open_filter_menu")]
+        ]
+        
+        if edit_message_id:
+            try:
+                await context.bot.edit_message_text(chat_id=user_id, message_id=edit_message_id, text=text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+                return
+            except Exception:
+                pass
+        await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    # Pick top candidate
+    candidate = candidates[0]
+    candidate_id = candidate["user_id"]
+    viewed_candidates[user_id].add(candidate_id)
+    current_previews[user_id] = candidate_id
+
+    # Try sending match found animation if available
+    await send_asset_animation(user_id, "match_found", context)
+
+    # Format card
+    card_text = format_profile_card(candidate, is_self=False)
+    card_text += "\n<i>Tap [💬 Start Chatting] to connect 1-on-1 now!</i>"
+
+    # Action Buttons
+    keyboard = [
+        [InlineKeyboardButton("💬 Start Chatting", callback_data=f"start_chat_{candidate_id}")],
+        [
+            InlineKeyboardButton("⏭️ Next Candidate", callback_data=f"next_candidate_{filter_code}"),
+            InlineKeyboardButton("⚙️ Change Filter", callback_data="open_filter_menu")
+        ]
+    ]
+
+    if edit_message_id:
+        try:
+            await context.bot.edit_message_text(chat_id=user_id, message_id=edit_message_id, text=card_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        except Exception:
+            pass
+
+    await context.bot.send_message(chat_id=user_id, text=card_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def start_chat_session(user1_id: int, user2_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Establishes a 1-on-1 active chat session between two students."""
+    # Disconnect any old active sessions
+    if user1_id in active_chats:
+        await disconnect_chat(user1_id, context, notify_partner=False)
+    if user2_id in active_chats:
+        await disconnect_chat(user2_id, context, notify_partner=False)
+
+    # Link both users
+    active_chats[user1_id] = user2_id
+    active_chats[user2_id] = user1_id
+
+    p1 = await db.get_user(user1_id) or {}
+    p2 = await db.get_user(user2_id) or {}
+
+    p1_name = p1.get("full_name") or "Student"
+    p2_name = p2.get("full_name") or "Student"
+
+    p1_username = p1.get("username") or p1.get("social_handle", "").replace("@", "")
+    p2_username = p2.get("username") or p2.get("social_handle", "").replace("@", "")
+
+    # Direct contact buttons
+    p2_direct_link = f"https://t.me/{p2_username}" if p2_username and not p2_username.startswith("Will") else None
+    p1_direct_link = f"https://t.me/{p1_username}" if p1_username and not p1_username.startswith("Will") else None
+
+    # Trigger chat start celebration animations if available in /assets
+    await send_asset_animation(user1_id, "chat_start", context)
+    await send_asset_animation(user2_id, "chat_start", context)
+
+    # Message for User 1
+    msg1 = (
+        f"🎉 <b>Connected with {p2_name}!</b> 🎓\n\n"
+        f"💬 <b>You can now chat directly in this bot.</b> All text, photos, voice notes, stickers, and files will be relayed instantly!\n"
+    )
+    if p2_direct_link:
+        msg1 += f"🔗 <b>Direct Telegram Link:</b> <a href=\"{p2_direct_link}\">@{p2_username}</a>\n"
+    msg1 += "\n<i>Use /next to skip or /stop to end the chat.</i>"
+
+    # Message for User 2
+    msg2 = (
+        f"🔔 <b>{p1_name} started a 1-on-1 chat with you!</b> 🎓\n\n"
+        f"💬 <b>You can chat right here in the bot.</b> All messages & media are delivered in real-time!\n"
+    )
+    if p1_direct_link:
+        msg2 += f"🔗 <b>Direct Telegram Link:</b> <a href=\"{p1_direct_link}\">@{p1_username}</a>\n"
+    msg2 += "\n<i>Use /next to skip or /stop to end the chat.</i>"
 
     try:
-        await context.bot.send_message(
-            chat_id=partner_id,
-            text=info_text,
-            parse_mode="HTML",
-            reply_markup=get_in_chat_keyboard()
-        )
+        await context.bot.send_message(chat_id=user1_id, text=msg1, parse_mode="HTML", reply_markup=get_in_chat_keyboard(), disable_web_page_preview=True)
     except Exception as e:
-        logger.error(f"Failed to send match alert to {partner_id}: {e}")
+        logger.error(f"Error sending chat start to {user1_id}: {e}")
 
-    await db.increment_chat_count(user_id, partner_id)
-    return True
+    try:
+        await context.bot.send_message(chat_id=user2_id, text=msg2, parse_mode="HTML", reply_markup=get_in_chat_keyboard(), disable_web_page_preview=True)
+    except Exception as e:
+        logger.error(f"Error sending chat start to {user2_id}: {e}")
+
+    await db.increment_chat_count(user1_id, user2_id)
 
 
 async def disconnect_chat(user_id: int, context: ContextTypes.DEFAULT_TYPE, notify_partner: bool = True, reason: str = "Partner left"):
-    """Disconnect active pair."""
+    """Disconnect active 1-on-1 session."""
     partner_id = active_chats.pop(user_id, None)
     if partner_id:
         active_chats.pop(partner_id, None)
@@ -391,33 +347,31 @@ async def disconnect_chat(user_id: int, context: ContextTypes.DEFAULT_TYPE, noti
             try:
                 await context.bot.send_message(
                     chat_id=partner_id,
-                    text=f"👋 <b>Your chat partner has disconnected.</b> ({reason})\n\nTap below to find someone new on campus!",
+                    text=f"👋 <b>Your chat session ended.</b> ({reason})\n\nTap below to find a new match!",
                     parse_mode="HTML",
                     reply_markup=get_main_menu_keyboard()
                 )
             except Exception as e:
                 logger.error(f"Error notifying partner {partner_id}: {e}")
 
-    # Remove any reveal tokens
-    reveal_requests.pop(user_id, None)
-    if partner_id:
-        reveal_requests.pop(partner_id, None)
-
 
 # ---------------------------------------------------------------------------
 # COMMAND HANDLERS
 # ---------------------------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command. Check registration."""
+    """Handle /start command. Onboarding check."""
     user = update.effective_user
     db_user = await db.get_user(user.id)
+
+    # Trigger welcome animation sticker
+    await send_asset_animation(user.id, "welcome", context)
 
     if not db_user:
         welcome_text = (
             f"👋 Welcome to <b>{UNIVERSITY_NAME} Stranger & Friend Finder</b>! 🏛️\n\n"
-            f"Connect 1-on-1 with random students across campus anonymously. "
-            f"Chat, discover common majors and hobbies, and swap social handles when you're ready to grab coffee or study together!\n\n"
-            f"Let's set up your quick student profile first (takes 20 seconds) 👇"
+            f"Connect 1-on-1 with students across campus using custom filters (Female, Male, Major, Hobbies). "
+            f"Preview profiles, usernames, and start chatting instantly!\n\n"
+            f"Let's set up your quick student profile (takes 20 seconds) 👇"
         )
         keyboard = [[InlineKeyboardButton("🚀 Create Student Profile", callback_data="start_onboarding")]]
         await update.message.reply_text(
@@ -426,141 +380,69 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     else:
+        name = db_user.get("full_name") or "Student"
         await update.message.reply_text(
-            f"Welcome back, <b>{db_user.get('full_name', 'Student')}</b>! 🎓\n\n"
-            f"Ready to meet someone new around campus?",
+            f"Welcome back, <b>{name}</b>! 🎓\n\n"
+            f"What would you like to do today?",
             parse_mode="HTML",
             reply_markup=get_main_menu_keyboard()
         )
 
 
 async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start searching for a campus stranger."""
+    """Open match finder with filter options."""
     user_id = update.effective_user.id
     db_user = await db.get_user(user_id)
 
     if not db_user:
         await update.message.reply_text(
-            "⚠️ Please complete your student profile first with /profile or /start to start matching!",
+            "⚠️ Please complete your student profile first to find matches!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 Setup Profile", callback_data="start_onboarding")]])
         )
         return
 
     if user_id in active_chats:
         await update.message.reply_text(
-            "⚠️ You are already in an active chat! Use /next to find someone else or /stop to end it.",
+            "⚠️ You are currently in an active chat! Use /next to find someone else or /stop to end it.",
             reply_markup=get_in_chat_keyboard()
         )
         return
 
-    if user_id in waiting_queue:
-        await update.message.reply_text("⏳ You are already in the queue. Looking for a campus match...")
-        return
+    # Check user's preferred filter
+    current_filter = db_user.get("preferred_gender") or "filter_any"
+    if not current_filter.startswith("filter_"):
+        current_filter = "filter_any"
 
-    await update.message.reply_text(
-        f"🔍 <b>Searching for an active student at {UNIVERSITY_NAME}...</b>\n"
-        "Hang tight, you'll be connected in moments! ⏳\n\n"
-        "<i>Send /stop at any time to cancel queue.</i>",
-        parse_mode="HTML"
+    text = (
+        f"🔍 <b>Find Campus Match at {UNIVERSITY_NAME}</b>\n\n"
+        f"Select your match filter below or search anyone instantly:"
     )
-
-    matched = await match_user(user_id, context)
-    if not matched:
-        logger.info(f"User {user_id} added to waiting queue (Current queue size: {len(waiting_queue)})")
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=get_filter_keyboard(current_filter))
 
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Disconnect current stranger and immediately find a new one."""
+    """Skip to the next student candidate."""
     user_id = update.effective_user.id
     if user_id in active_chats:
         await disconnect_chat(user_id, context, notify_partner=True, reason="Partner skipped to /next")
-        await update.message.reply_text("⏭️ <b>Skipped to next!</b> Searching for a new student...", parse_mode="HTML")
-        await match_user(user_id, context)
-    elif user_id in waiting_queue:
-        await update.message.reply_text("⏳ Still looking for a student in queue...")
+        await update.message.reply_text("⏭️ <b>Skipped!</b> Finding a new student match...", parse_mode="HTML")
+        await search_and_display_candidate(user_id, context, filter_code="filter_any")
     else:
-        await find_command(update, context)
+        await search_and_display_candidate(user_id, context, filter_code="filter_any")
 
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop active chat or leave queue."""
+    """End the current chat session."""
     user_id = update.effective_user.id
-    if user_id in waiting_queue:
-        waiting_queue.remove(user_id)
-        await update.message.reply_text("🛑 <b>Left the search queue.</b>", parse_mode="HTML", reply_markup=get_main_menu_keyboard())
-        return
-
     if user_id in active_chats:
         await disconnect_chat(user_id, context, notify_partner=True, reason="Partner ended the chat")
-        await update.message.reply_text("🛑 <b>Chat ended.</b> Hope you had a nice talk!", parse_mode="HTML", reply_markup=get_main_menu_keyboard())
-        return
-
-    await update.message.reply_text("You are not in any active chat.", reply_markup=get_main_menu_keyboard())
-
-
-async def reveal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Propose social profile swap."""
-    user_id = update.effective_user.id
-    if user_id not in active_chats:
-        await update.message.reply_text("⚠️ You must be in an active chat with a student to exchange profiles.")
-        return
-
-    partner_id = active_chats[user_id]
-    user_reveals = reveal_requests.setdefault(user_id, set())
-    user_reveals.add(partner_id)
-
-    partner_reveals = reveal_requests.get(partner_id, set())
-
-    if user_id in partner_reveals:
-        # BOTH AGREED! Exchange profiles!
-        p1 = await db.get_user(user_id)
-        p2 = await db.get_user(partner_id)
-
-        msg_for_user = (
-            "🎉 <b>MUTUAL REVEAL SUCCESSFUL!</b> 🤝\n\n"
-            f"Here is your partner's student profile:\n"
-            f"👤 <b>Name:</b> {p2.get('full_name', 'Student')}\n"
-            f"📚 <b>Major:</b> {p2.get('major', 'N/A')} ({p2.get('study_year', 'N/A')})\n"
-            f"🏢 <b>Dorm/Campus:</b> {p2.get('dorm', 'N/A')}\n"
-            f"✨ <b>Interests:</b> {p2.get('interests', 'N/A')}\n"
-            f"📝 <b>Bio:</b> {p2.get('bio', '')}\n\n"
-            f"🔗 <b>Contact / Social Handle:</b> {p2.get('social_handle', 'N/A')}\n\n"
-            f"<i>You can now reach out directly or propose a spot to meet via /meet!</i>"
-        )
-
-        msg_for_partner = (
-            "🎉 <b>MUTUAL REVEAL SUCCESSFUL!</b> 🤝\n\n"
-            f"Here is your partner's student profile:\n"
-            f"👤 <b>Name:</b> {p1.get('full_name', 'Student')}\n"
-            f"📚 <b>Major:</b> {p1.get('major', 'N/A')} ({p1.get('study_year', 'N/A')})\n"
-            f"🏢 <b>Dorm/Campus:</b> {p1.get('dorm', 'N/A')}\n"
-            f"✨ <b>Interests:</b> {p1.get('interests', 'N/A')}\n"
-            f"📝 <b>Bio:</b> {p1.get('bio', '')}\n\n"
-            f"🔗 <b>Contact / Social Handle:</b> {p1.get('social_handle', 'N/A')}\n\n"
-            f"<i>You can now reach out directly or propose a spot to meet via /meet!</i>"
-        )
-
-        await context.bot.send_message(chat_id=user_id, text=msg_for_user, parse_mode="HTML")
-        await context.bot.send_message(chat_id=partner_id, text=msg_for_partner, parse_mode="HTML")
+        await update.message.reply_text("🛑 <b>Chat ended.</b>", parse_mode="HTML", reply_markup=get_main_menu_keyboard())
     else:
-        await update.message.reply_text("⏳ <b>Reveal request sent!</b> Waiting for your chat partner to accept...", parse_mode="HTML")
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Accept Profile Swap", callback_data="accept_reveal"),
-                InlineKeyboardButton("❌ Decline", callback_data="decline_reveal")
-            ]
-        ]
-        await context.bot.send_message(
-            chat_id=partner_id,
-            text="🤝 <b>Your chat partner proposed to swap student profiles & social handles!</b>\n\nDo you accept?",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await update.message.reply_text("You are not currently in any active chat.", reply_markup=get_main_menu_keyboard())
 
 
 async def meet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Suggest random campus spot and icebreaker."""
+    """Suggest random campus meetup spot and icebreaker."""
     user_id = update.effective_user.id
     if user_id not in active_chats:
         await update.message.reply_text("⚠️ Connect with a student first using /find!")
@@ -571,10 +453,10 @@ async def meet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     icebreaker = random.choice(ICEBREAKERS)
 
     text = (
-        f"📍 <b>Campus Meetup Suggestion</b>\n\n"
-        f"🏛️ <b>Spot:</b> {spot}\n"
+        f"📍 <b>Campus Meetup Suggestion</b> 🏛️\n\n"
+        f"📌 <b>Spot:</b> {spot}\n"
         f"💡 <b>Icebreaker Question:</b> <i>\"{icebreaker}\"</i>\n\n"
-        f"<i>Want to meet there? Ask your partner or tap /reveal to exchange socials!</i>"
+        f"<i>Want to grab coffee or study there together? Send a message to your partner!</i>"
     )
 
     await update.message.reply_text(text, parse_mode="HTML")
@@ -582,71 +464,71 @@ async def meet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Report and block stranger."""
+    """Report and permanently block inappropriate partner."""
     user_id = update.effective_user.id
     if user_id not in active_chats:
-        await update.message.reply_text("⚠️ You can only report someone during an active chat.")
+        await update.message.reply_text("⚠️ You can only report a user during an active chat.")
         return
 
     partner_id = active_chats[user_id]
     blocked_pairs.setdefault(user_id, set()).add(partner_id)
     blocked_pairs.setdefault(partner_id, set()).add(user_id)
 
-    await disconnect_chat(user_id, context, notify_partner=True, reason="Partner reported & ended chat")
-    await db.log_report(user_id, partner_id, "Inappropriate chat report")
+    await disconnect_chat(user_id, context, notify_partner=True, reason="Reported and blocked")
+    await db.log_report(user_id, partner_id, "Inappropriate chat behavior report")
 
     await update.message.reply_text(
         "🛡️ <b>User reported and permanently blocked.</b> You will never be matched with them again.\n\nSearching for a new student...",
         parse_mode="HTML"
     )
-    await match_user(user_id, context)
+    await search_and_display_candidate(user_id, context, filter_code="filter_any")
 
 
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show current student profile."""
+    """Show current user's profile with edit button."""
     user_id = update.effective_user.id
     p = await db.get_user(user_id)
     if not p:
-        await update.message.reply_text("No profile found. Use /start to create one.")
+        await update.message.reply_text(
+            "No profile found. Let's create one!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 Create Profile", callback_data="start_onboarding")]])
+        )
         return
 
-    text = (
-        f"🎓 <b>Your {UNIVERSITY_NAME} Profile</b>\n\n"
-        f"👤 <b>Name:</b> {p.get('full_name')}\n"
-        f"📚 <b>Major:</b> {p.get('major')} ({p.get('study_year')})\n"
-        f"🏢 <b>Dorm/Area:</b> {p.get('dorm')}\n"
-        f"✨ <b>Interests:</b> {p.get('interests')}\n"
-        f"📝 <b>Bio:</b> {p.get('bio')}\n"
-        f"🔗 <b>Handle:</b> {p.get('social_handle')}\n"
-        f"📊 <b>Total Chats:</b> {p.get('total_chats', 0)}"
-    )
-    keyboard = [[InlineKeyboardButton("✏️ Edit Profile", callback_data="start_onboarding")]]
-    await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    card = format_profile_card(p, is_self=True)
+    keyboard = [
+        [InlineKeyboardButton("✏️ Edit Profile", callback_data="start_onboarding")],
+        [InlineKeyboardButton("🎯 Change Match Filters", callback_data="open_filter_menu")]
+    ]
+    await update.message.reply_text(card, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 # ---------------------------------------------------------------------------
-# MESSAGE RELAY (ANONYMOUS CHAT BRIDGE)
+# MESSAGE RELAY (1-ON-1 CHAT BRIDGE & MEDIA SUPPORT)
 # ---------------------------------------------------------------------------
 async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Relay user message to connected stranger anonymously."""
+    """Relays text, images, videos, voice notes, stickers, and documents between matched pairs."""
     user_id = update.effective_user.id
     text = update.message.text if update.message else ""
 
-    # Check for Quick Keyboard text triggers
-    if text == "🔍 Find Campus Stranger" or text == "🎯 Common Interest Match":
+    # Menu triggers
+    if text == "🔍 Find Campus Match":
         await find_command(update, context)
         return
-    elif text == "⏭️ Next Stranger":
+    elif text == "🎯 Gender & Filters":
+        await find_command(update, context)
+        return
+    elif text == "⏭️ Next Match":
         await next_command(update, context)
         return
     elif text == "🛑 End Chat":
         await stop_command(update, context)
         return
-    elif text == "🤝 Reveal Profile / Swap Socials":
-        await reveal_command(update, context)
-        return
     elif text == "📍 Suggest Campus Spot":
         await meet_command(update, context)
+        return
+    elif text == "🛡️ Report User":
+        await report_command(update, context)
         return
     elif text == "👤 My Student Profile":
         await profile_command(update, context)
@@ -654,36 +536,34 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "❓ Help & Rules":
         await update.message.reply_text(
             f"📖 <b>{UNIVERSITY_NAME} Bot Rules & Help</b>\n\n"
-            "1. <b>Be Respectful:</b> Treat fellow students with kindness.\n"
-            "2. <b>Anonymous First:</b> Your name & handle are hidden until you both tap /reveal.\n"
-            "3. <b>Physical Meetups:</b> Always meet in public campus areas (Library, Student Union, Campus Cafes).\n"
-            "4. <b>Safety:</b> Use /report immediately if someone behaves inappropriately.\n\n"
+            "1. <b>Respect:</b> Treat fellow students with kindness and respect.\n"
+            "2. <b>Filter Match:</b> Choose your filters (Female, Male, Anyone) before searching.\n"
+            "3. <b>Profile Preview:</b> Review student bios and handles before tapping [Start Chatting].\n"
+            "4. <b>Safety:</b> Always meet in public campus areas (Student Union, Library, Quad).\n"
+            "5. <b>Block:</b> Use /report to permanently block inappropriate users.\n\n"
             "<b>Commands:</b>\n"
-            "/find - Find a stranger\n"
-            "/next - Skip to next student\n"
-            "/stop - Stop chatting\n"
-            "/reveal - Exchange profiles & socials\n"
-            "/meet - Campus spot & icebreaker\n"
-            "/profile - View your profile",
+            "/find - Find matches with filters\n"
+            "/next - Next student\n"
+            "/stop - End chat\n"
+            "/meet - Campus spot & icebreakers\n"
+            "/profile - View and edit your profile\n"
+            "/report - Block & report partner",
             parse_mode="HTML"
         )
         return
 
     # Check if user is in an active chat
     if user_id not in active_chats:
-        if user_id in waiting_queue:
-            await update.message.reply_text("⏳ You are still in queue. We'll connect you as soon as another student searches!")
-        else:
-            await update.message.reply_text(
-                "💬 You are not in a chat right now. Tap <b>🔍 Find Campus Stranger</b> below to start!",
-                parse_mode="HTML",
-                reply_markup=get_main_menu_keyboard()
-            )
+        await update.message.reply_text(
+            "💬 You are not in an active chat right now. Tap <b>🔍 Find Campus Match</b> below to connect with students!",
+            parse_mode="HTML",
+            reply_markup=get_main_menu_keyboard()
+        )
         return
 
     partner_id = active_chats[user_id]
 
-    # Forward message types anonymously
+    # Forward message & media types
     try:
         if update.message.text:
             await context.bot.send_message(chat_id=partner_id, text=update.message.text)
@@ -710,7 +590,7 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif update.message.video_note:
             await context.bot.send_video_note(chat_id=partner_id, video_note=update.message.video_note.file_id)
         else:
-            await update.message.reply_text("ℹ️ This media format is not supported for anonymous relay.")
+            await update.message.reply_text("ℹ️ This media format is not supported.")
     except Exception as e:
         logger.error(f"Error relaying message from {user_id} to {partner_id}: {e}")
         await update.message.reply_text("⚠️ Could not deliver message. Your partner might have disconnected.")
@@ -718,49 +598,70 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
-# ONBOARDING CONVERSATION FLOW
+# ONBOARDING CONVERSATION FLOW (NAME -> GENDER -> MAJOR -> YEAR -> DORM -> HOBBIES -> HANDLE)
 # ---------------------------------------------------------------------------
 async def start_onboarding_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data["onboarding"] = {}
-    await query.edit_message_text("🎓 Step 1/5: What is your <b>First Name</b> or Nickname on campus?", parse_mode="HTML")
+    await query.edit_message_text("🎓 <b>Step 1/7:</b> What is your <b>First Name</b> or Nickname on campus?", parse_mode="HTML")
     return STATE_NAME
+
 
 async def onboarding_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["name"] = update.message.text.strip()
-    await update.message.reply_text("📚 Step 2/5: What is your <b>Major / Faculty</b>? (e.g. Computer Science, Business, Biology, Arts)", parse_mode="HTML")
+    
+    keyboard = [[KeyboardButton(g)] for g in GENDER_OPTIONS]
+    await update.message.reply_text(
+        "⚧ <b>Step 2/7:</b> What is your <b>Gender</b>? (Used for match filtering)",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    )
+    return STATE_GENDER
+
+
+async def onboarding_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["onboarding"]["gender"] = update.message.text.strip()
+    await update.message.reply_text(
+        "📚 <b>Step 3/7:</b> What is your <b>Major / Department</b>? (e.g. Computer Science, Business, Biology, Medicine)",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove()
+    )
     return STATE_MAJOR
+
 
 async def onboarding_major(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["major"] = update.message.text.strip()
     
     keyboard = [[KeyboardButton(y)] for y in YEAR_OPTIONS]
     await update.message.reply_text(
-        "📅 Step 3/5: What is your <b>Academic Year</b>?",
+        "📅 <b>Step 4/7:</b> What is your <b>Academic Year</b>?",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
     return STATE_YEAR
 
+
 async def onboarding_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["year"] = update.message.text.strip()
     await update.message.reply_text(
-        "🏢 Step 4/5: What is your <b>Campus / Dorm / Area</b>? (e.g. North Dorms, Off-Campus West, Engineering Quad)",
+        "🏢 <b>Step 5/7:</b> What is your <b>Campus / Dorm / Area</b>? (e.g. North Dorms, Off-Campus West, Engineering Quad)",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove()
     )
     return STATE_DORM
 
+
 async def onboarding_dorm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["dorm"] = update.message.text.strip()
     
     await update.message.reply_text(
-        "✨ Step 5/5: Type 2 to 4 of your <b>Interests & Hobbies</b> separated by commas.\n\n"
-        "<i>Examples: Coffee, Coding, Gaming, Gym, Anime, Study Buddies</i>",
+        "✨ <b>Step 6/7:</b> Type 2 to 4 of your <b>Interests & Hobbies</b> separated by commas.\n\n"
+        "<i>Examples: Coffee, Coding, Gaming, Gym, Anime, Music, Study Buddies</i>",
         parse_mode="HTML"
     )
     return STATE_INTERESTS
+
 
 async def onboarding_interests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text.strip()
@@ -771,11 +672,13 @@ async def onboarding_interests(update: Update, context: ContextTypes.DEFAULT_TYP
     default_handle = f"@{user.username}" if user.username else "Will share manually"
 
     await update.message.reply_text(
-        f"🔗 What is your <b>Telegram Username or Instagram Handle</b> to exchange when you mutually reveal?\n\n"
+        f"🔗 <b>Step 7/7:</b> What is your <b>Telegram Username or Social Handle</b>?\n\n"
+        f"This will be visible on your profile card so matches can connect with you.\n"
         f"(Default: <code>{default_handle}</code> or type custom):",
         parse_mode="HTML"
     )
     return STATE_HANDLE
+
 
 async def onboarding_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     handle = update.message.text.strip()
@@ -785,13 +688,16 @@ async def onboarding_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = context.user_data["onboarding"]
     data["user_id"] = user.id
     data["username"] = user.username or ""
+    data["preferred_gender"] = "filter_any"
 
     await db.save_user(data)
 
+    await send_asset_animation(user.id, "welcome", context)
+
     await update.message.reply_text(
-        f"🎉 <b>Profile Created Successfully!</b>\n\n"
-        f"You are all set to find new friends across {UNIVERSITY_NAME}! 🏛️\n"
-        f"Tap <b>🔍 Find Campus Stranger</b> below to start your first chat.",
+        f"🎉 <b>Profile Created Successfully!</b> 🎓\n\n"
+        f"You are all set to find new friends across {UNIVERSITY_NAME}!\n"
+        f"Tap <b>🔍 Find Campus Match</b> below to choose filters and start matching.",
         parse_mode="HTML",
         reply_markup=get_main_menu_keyboard()
     )
@@ -804,50 +710,54 @@ async def cancel_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
-# CALLBACK QUERY HANDLER (FOR REVEAL & BUTTONS)
+# CALLBACK QUERY HANDLER (FILTERS, CANDIDATE CYCLING, START CHATTING)
 # ---------------------------------------------------------------------------
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     user_id = query.from_user.id
+    msg_id = query.message.message_id if query.message else None
 
-    if data == "accept_reveal":
-        if user_id not in active_chats:
-            await query.edit_message_text("⚠️ Chat already ended.")
+    # 1. Open Filter Menu
+    if data == "open_filter_menu":
+        user = await db.get_user(user_id) or {}
+        current_pref = user.get("preferred_gender", "filter_any")
+        text = (
+            f"🎯 <b>Match Filter Settings</b>\n\n"
+            f"Select who you want to search for across {UNIVERSITY_NAME}:"
+        )
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=get_filter_keyboard(current_pref))
+        return
+
+    # 2. Apply a Filter and Search
+    elif data.startswith("apply_"):
+        filter_code = data.replace("apply_", "")
+        await db.update_preference(user_id, filter_code)
+        await send_asset_animation(user_id, "search", context)
+        await search_and_display_candidate(user_id, context, filter_code=filter_code, edit_message_id=None)
+        return
+
+    # 3. Next Candidate
+    elif data.startswith("next_candidate_"):
+        filter_code = data.replace("next_candidate_", "")
+        await send_asset_animation(user_id, "search", context)
+        await search_and_display_candidate(user_id, context, filter_code=filter_code, edit_message_id=None)
+        return
+
+    # 4. START CHATTING BUTTON CLICKED!
+    elif data.startswith("start_chat_"):
+        target_candidate_id = int(data.replace("start_chat_", ""))
+        
+        # Check if already chatting with someone
+        if user_id in active_chats:
+            await query.edit_message_text("⚠️ You are already in an active chat. Use /stop to end it first.")
             return
 
-        partner_id = active_chats[user_id]
-        reveal_requests.setdefault(user_id, set()).add(partner_id)
-        
-        await query.edit_message_text("✅ Accepted! Exchanging profiles...")
-        
-        p1 = await db.get_user(user_id)
-        p2 = await db.get_user(partner_id)
-
-        msg1 = (
-            "🎉 <b>MUTUAL PROFILE REVEAL!</b> 🤝\n\n"
-            f"👤 <b>Name:</b> {p2.get('full_name')}\n"
-            f"📚 <b>Major:</b> {p2.get('major')} ({p2.get('study_year')})\n"
-            f"🏢 <b>Dorm:</b> {p2.get('dorm')}\n"
-            f"✨ <b>Interests:</b> {p2.get('interests')}\n"
-            f"🔗 <b>Contact Handle:</b> {p2.get('social_handle')}\n\n"
-            f"<i>Say hi or suggest a campus spot with /meet!</i>"
-        )
-        msg2 = (
-            "🎉 <b>MUTUAL PROFILE REVEAL!</b> 🤝\n\n"
-            f"👤 <b>Name:</b> {p1.get('full_name')}\n"
-            f"📚 <b>Major:</b> {p1.get('major')} ({p1.get('study_year')})\n"
-            f"🏢 <b>Dorm:</b> {p1.get('dorm')}\n"
-            f"✨ <b>Interests:</b> {p1.get('interests')}\n"
-            f"🔗 <b>Contact Handle:</b> {p1.get('social_handle')}\n\n"
-            f"<i>Say hi or suggest a campus spot with /meet!</i>"
-        )
-        await context.bot.send_message(chat_id=user_id, text=msg1, parse_mode="HTML")
-        await context.bot.send_message(chat_id=partner_id, text=msg2, parse_mode="HTML")
-
-    elif data == "decline_reveal":
-        await query.edit_message_text("❌ You declined the profile exchange. The chat remains 100% anonymous.")
+        # Start 1-on-1 session
+        await query.edit_message_text("🚀 <b>Connecting to 1-on-1 chat...</b>", parse_mode="HTML")
+        await start_chat_session(user_id, target_candidate_id, context)
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -861,7 +771,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK - Campus Telegram Bot is running!\n")
 
     def log_message(self, format, *args):
-        # Suppress noisy HTTP health log polling
         pass
 
 
@@ -909,6 +818,7 @@ def main():
         ],
         states={
             STATE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_name)],
+            STATE_GENDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_gender)],
             STATE_MAJOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_major)],
             STATE_YEAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_year)],
             STATE_DORM: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_dorm)],
@@ -921,21 +831,22 @@ def main():
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("find", find_command))
+    app.add_handler(CommandHandler("filter", find_command))
+    app.add_handler(CommandHandler("filters", find_command))
     app.add_handler(CommandHandler("next", next_command))
     app.add_handler(CommandHandler("stop", stop_command))
-    app.add_handler(CommandHandler("reveal", reveal_command))
     app.add_handler(CommandHandler("meet", meet_command))
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("profile", profile_command))
     
-    # Generic Callback Query Handler
+    # Generic Callback Query Handler (Filters, Start Chatting, Next candidate)
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    # Anonymous Message Relay Handler (Text, Photos, Voice, Stickers)
+    # Anonymous & Direct Message Relay Handler (Text, Photos, Voice, Videos, Stickers, Docs)
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
 
-    # Run Bot via Long Polling (Works 24/7 on Free hosts without public SSL IP required!)
-    logger.info(f" Starting {UNIVERSITY_NAME} Bot (Polling Mode)...")
+    # Run Bot via Long Polling
+    logger.info(f"🚀 Starting {UNIVERSITY_NAME} Bot (Polling Mode)...")
     app.run_polling(drop_pending_updates=True)
 
 
