@@ -85,8 +85,9 @@ db = DatabaseManager(DATABASE_URL)
     STATE_YEAR,
     STATE_DORM,
     STATE_INTERESTS,
+    STATE_BIO,
     STATE_PHOTO
-) = range(7)
+) = range(8)
 
 # ---------------------------------------------------------------------------
 # IN-MEMORY ACTIVE STATE
@@ -730,7 +731,7 @@ async def start_onboarding_callback(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     await query.answer()
     context.user_data["onboarding"] = {}
-    await query.edit_message_text("<b>Step 1/7:</b> What is your <b>First Name</b> or Nickname on campus?", parse_mode="HTML")
+    await query.edit_message_text("<b>Step 1/8:</b> What is your <b>First Name</b> or Nickname on campus?", parse_mode="HTML")
     return STATE_NAME
 
 
@@ -739,7 +740,7 @@ async def onboarding_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [[KeyboardButton(g)] for g in GENDER_OPTIONS]
     await update.message.reply_text(
-        "<b>Step 2/7:</b> What is your <b>Gender</b>? (Used for match filtering)",
+        "<b>Step 2/8:</b> What is your <b>Gender</b>? (Used for match filtering)",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
@@ -749,7 +750,7 @@ async def onboarding_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def onboarding_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["gender"] = update.message.text.strip()
     await update.message.reply_text(
-        "<b>Step 3/7:</b> What is your <b>Major / Department</b>? (e.g. Computer Science, Business, Biology, Medicine)",
+        "<b>Step 3/8:</b> What is your <b>Major / Department</b>? (e.g. Computer Science, Business, Biology, Medicine)",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove()
     )
@@ -761,7 +762,7 @@ async def onboarding_major(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [[KeyboardButton(y)] for y in YEAR_OPTIONS]
     await update.message.reply_text(
-        "<b>Step 4/7:</b> What is your <b>Academic Year</b>?",
+        "<b>Step 4/8:</b> What is your <b>Academic Year</b>?",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
@@ -771,7 +772,7 @@ async def onboarding_major(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def onboarding_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["year"] = update.message.text.strip()
     await update.message.reply_text(
-        "<b>Step 5/7:</b> What is your <b>Campus / Dorm / Area</b>? (e.g. North Dorms, Off-Campus West, Engineering Quad)",
+        "<b>Step 5/8:</b> What is your <b>Campus / Dorm / Area</b>? (e.g. North Dorms, Off-Campus West, Engineering Quad)",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove()
     )
@@ -782,7 +783,7 @@ async def onboarding_dorm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["onboarding"]["dorm"] = update.message.text.strip()
     
     await update.message.reply_text(
-        "<b>Step 6/7:</b> Type 2 to 4 of your <b>Interests & Hobbies</b> separated by commas.\n\n"
+        "<b>Step 6/8:</b> Type 2 to 4 of your <b>Interests & Hobbies</b> separated by commas.\n\n"
         "<i>Examples: Coffee, Coding, Gaming, Gym, Anime, Music, Study Buddies</i>",
         parse_mode="HTML"
     )
@@ -795,7 +796,18 @@ async def onboarding_interests(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["onboarding"]["interests"] = interests
     
     await update.message.reply_text(
-        f"<b>Step 7/7:</b> Upload a <b>Real Photo</b> of yourself!\n\n"
+        f"<b>Step 7/8:</b> Write a short <b>Bio</b> about yourself.\n\n"
+        f"<i>Example: 'Hey! Excited to meet people around campus. Always down for coffee!'</i>",
+        parse_mode="HTML"
+    )
+    return STATE_BIO
+
+
+async def onboarding_bio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["onboarding"]["bio"] = update.message.text.strip()
+    
+    await update.message.reply_text(
+        f"<b>Step 8/8:</b> Upload a <b>Real Photo</b> of yourself!\n\n"
         f"This helps build trust and makes finding matches better.\n"
         f"(Send a photo, or type /skip to use no photo):",
         parse_mode="HTML"
@@ -1016,6 +1028,7 @@ def main():
             STATE_YEAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_year)],
             STATE_DORM: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_dorm)],
             STATE_INTERESTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_interests)],
+            STATE_BIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_bio)],
             STATE_PHOTO: [MessageHandler((filters.PHOTO | filters.TEXT) & ~filters.COMMAND, onboarding_photo)],
         },
         fallbacks=[CommandHandler("cancel", cancel_onboarding)],
