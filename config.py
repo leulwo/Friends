@@ -52,13 +52,15 @@ STICKER_SET_NAME = os.getenv("STICKER_SET_NAME", "FINDONEREAL").strip()
 
 # Optional Telegram Sticker File IDs (from Telegram animated sticker packs)
 # Users can set file_ids directly or the bot auto-fetches them from STICKER_SET_NAME
+# Values can be single file_id strings or lists of file_ids (e.g. for random loading animations)
 STICKER_IDS = {
-    "welcome": os.getenv("STICKER_WELCOME", ""),
-    "search": os.getenv("STICKER_SEARCH", ""),
-    "match_found": os.getenv("STICKER_MATCH", ""),
-    "chat_start": os.getenv("STICKER_CHAT", ""),
-    "loading": os.getenv("STICKER_LOADING", ""),
-    "bored_waiting": os.getenv("STICKER_BORED", ""),
+    "welcome": [os.getenv("STICKER_WELCOME", "")] if os.getenv("STICKER_WELCOME") else [],
+    "search": [os.getenv("STICKER_SEARCH", "")] if os.getenv("STICKER_SEARCH") else [],
+    "match_found": [os.getenv("STICKER_MATCH", "")] if os.getenv("STICKER_MATCH") else [],
+    "chat_start": [os.getenv("STICKER_CHAT", "")] if os.getenv("STICKER_CHAT") else [],
+    "loading": [os.getenv("STICKER_LOADING", "")] if os.getenv("STICKER_LOADING") else [],
+    "bored_waiting": [os.getenv("STICKER_BORED", "")] if os.getenv("STICKER_BORED") else [],
+    "car": [],
 }
 
 

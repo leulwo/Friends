@@ -168,15 +168,22 @@ def format_profile_card(student: dict, is_self: bool = False) -> str:
 
 async def send_asset_animation(chat_id: int, animation_key: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
-    Sends Telegram animated stickers (.tgs) either via configured STICKER_IDS file_id
-    or directly from /assets/{animation_key}.tgs (with alias & case-insensitive matching).
+    Sends Telegram animated stickers (.tgs) either via configured STICKER_IDS file_id(s)
+    (randomly chosen if multiple stickers match) or directly from /assets/{animation_key}.tgs.
     """
-    # 1. Check if a Telegram Sticker File ID is configured in STICKER_IDS
-    sticker_id = STICKER_IDS.get(animation_key, "").strip()
-    if sticker_id:
+    # 1. Check if Telegram Sticker File ID(s) are configured in STICKER_IDS
+    sticker_entry = STICKER_IDS.get(animation_key)
+    sticker_candidates = []
+    if isinstance(sticker_entry, list):
+        sticker_candidates = [s for s in sticker_entry if s]
+    elif isinstance(sticker_entry, str) and sticker_entry.strip():
+        sticker_candidates = [sticker_entry.strip()]
+
+    if sticker_candidates:
+        chosen_id = random.choice(sticker_candidates)
         try:
-            await context.bot.send_sticker(chat_id=chat_id, sticker=sticker_id)
-            logger.info(f"Sent sticker by file_id for {animation_key} to {chat_id}")
+            await context.bot.send_sticker(chat_id=chat_id, sticker=chosen_id)
+            logger.info(f"Sent sticker by file_id for {animation_key} (from {len(sticker_candidates)} options) to {chat_id}")
             return True
         except Exception as e:
             logger.warning(f"Could not send sticker by file_id for {animation_key}: {e}")
@@ -198,37 +205,22 @@ async def send_asset_animation(chat_id: int, animation_key: str, context: Contex
     }
 
     candidates = aliases_map.get(animation_key, [f"{animation_key}.tgs"])
-    
-    # Try exact match or alias match first
-    for candidate in candidates:
-        candidate_path = os.path.join(assets_dir, candidate)
-        if os.path.exists(candidate_path):
-            try:
-                with open(candidate_path, "rb") as f:
-                    file_bytes = f.read()
-                input_file = InputFile(file_bytes, filename=f"{animation_key}.tgs")
-                await context.bot.send_sticker(chat_id=chat_id, sticker=input_file)
-                logger.info(f"Successfully sent .tgs sticker {candidate} for {animation_key} to {chat_id}")
-                return True
-            except Exception as e:
-                logger.warning(f"Could not send .tgs sticker asset {candidate_path}: {e}")
+    # Find all existing local matching files and pick randomly
+    existing_local_candidates = [
+        os.path.join(assets_dir, c) for c in candidates if os.path.exists(os.path.join(assets_dir, c))
+    ]
 
-    # Fallback: Case-insensitive search in assets folder for any .tgs containing the key
-    try:
-        norm_key = animation_key.lower().replace("_", "")
-        for filename in os.listdir(assets_dir):
-            if filename.lower().endswith(".tgs"):
-                norm_file = filename.lower().replace("_", "").replace(" ", "")
-                if norm_key in norm_file or any(c.lower().replace("_", "").replace(" ", "") in norm_file for c in candidates):
-                    candidate_path = os.path.join(assets_dir, filename)
-                    with open(candidate_path, "rb") as f:
-                        file_bytes = f.read()
-                    input_file = InputFile(file_bytes, filename=f"{animation_key}.tgs")
-                    await context.bot.send_sticker(chat_id=chat_id, sticker=input_file)
-                    logger.info(f"Successfully sent fallback .tgs sticker {filename} for {animation_key} to {chat_id}")
-                    return True
-    except Exception as e:
-        logger.warning(f"Fallback .tgs search error for {animation_key}: {e}")
+    if existing_local_candidates:
+        chosen_path = random.choice(existing_local_candidates)
+        try:
+            with open(chosen_path, "rb") as f:
+                file_bytes = f.read()
+            input_file = InputFile(file_bytes, filename=f"{animation_key}.tgs")
+            await context.bot.send_sticker(chat_id=chat_id, sticker=input_file)
+            logger.info(f"Successfully sent .tgs sticker {os.path.basename(chosen_path)} for {animation_key} to {chat_id}")
+            return True
+        except Exception as e:
+            logger.warning(f"Could not send .tgs sticker asset {chosen_path}: {e}")
 
     return False
 
@@ -854,27 +846,34 @@ async def post_init(app: Application):
             # 6 o'clock (🕕, 6) -> search (search.tgs)
             # 7 o'clock (🕖, 7) -> chat_start (Chat.tgs)
             # 8 o'clock (🕗, 8) -> welcome (Welcome.tgs)
+            # Helper to append sticker to list without duplicates
+            def add_sticker(action: str, file_id: str):
+                if action not in STICKER_IDS or not isinstance(STICKER_IDS[action], list):
+                    STICKER_IDS[action] = []
+                if file_id not in STICKER_IDS[action]:
+                    STICKER_IDS[action].append(file_id)
+
             for idx, sticker in enumerate(sticker_set.stickers):
                 emoji = sticker.emoji or ""
                 logger.info(f"Sticker [{idx}]: emoji='{emoji}', file_id='{sticker.file_id[:16]}...'")
 
                 # Check clock emojis and digits
                 if "🕐" in emoji or "1️⃣" in emoji or emoji == "1" or idx == 0:
-                    STICKER_IDS["loading"] = sticker.file_id
+                    add_sticker("loading", sticker.file_id)
                 if "🕑" in emoji or "2️⃣" in emoji or emoji == "2" or idx == 1:
-                    STICKER_IDS["match_found"] = sticker.file_id
+                    add_sticker("match_found", sticker.file_id)
                 if "🕒" in emoji or "3️⃣" in emoji or emoji == "3" or idx == 2:
-                    STICKER_IDS["car"] = sticker.file_id
+                    add_sticker("car", sticker.file_id)
                 if "🕓" in emoji or "4️⃣" in emoji or emoji == "4" or idx == 3:
-                    STICKER_IDS["bored_waiting"] = sticker.file_id
+                    add_sticker("bored_waiting", sticker.file_id)
                 if "🕔" in emoji or "5️⃣" in emoji or emoji == "5" or idx == 4:
-                    STICKER_IDS["loading"] = sticker.file_id
+                    add_sticker("loading", sticker.file_id)
                 if "🕕" in emoji or "6️⃣" in emoji or emoji == "6" or idx == 5:
-                    STICKER_IDS["search"] = sticker.file_id
+                    add_sticker("search", sticker.file_id)
                 if "🕖" in emoji or "7️⃣" in emoji or emoji == "7" or idx == 6:
-                    STICKER_IDS["chat_start"] = sticker.file_id
+                    add_sticker("chat_start", sticker.file_id)
                 if "🕗" in emoji or "8️⃣" in emoji or emoji == "8" or idx == 7:
-                    STICKER_IDS["welcome"] = sticker.file_id
+                    add_sticker("welcome", sticker.file_id)
 
             logger.info(f"Loaded STICKER_IDS mapping: {list(STICKER_IDS.keys())}")
         except Exception as e:
