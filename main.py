@@ -167,8 +167,8 @@ def format_profile_card(student: dict, is_self: bool = False) -> str:
 
 async def send_asset_animation(chat_id: int, animation_key: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
-    Checks for configured sticker file_ids or /assets animations (TGS, GIF, MP4) and sends it.
-    Validates .tgs file format to avoid sending corrupted files as unknown documents.
+    Sends Telegram animated stickers (.tgs) either via configured STICKER_IDS file_id
+    or directly from /assets/{animation_key}.tgs.
     """
     # 1. Check if a Telegram Sticker File ID is configured in STICKER_IDS
     sticker_id = STICKER_IDS.get(animation_key, "").strip()
@@ -179,45 +179,24 @@ async def send_asset_animation(chat_id: int, animation_key: str, context: Contex
         except Exception as e:
             logger.warning(f"Could not send sticker by file_id for {animation_key}: {e}")
 
-    # 2. Check local assets directory
+    # 2. Check local assets directory for .tgs animated sticker file
     assets_dir = os.path.join(os.path.dirname(__file__), "assets")
     if not os.path.exists(assets_dir):
         return False
 
-    extensions = [".gif", ".mp4", ".tgs", ".webp", ".png"]
-    for ext in extensions:
-        filename = f"{animation_key}{ext}"
-        candidate_path = os.path.join(assets_dir, filename)
-        if os.path.exists(candidate_path):
-            try:
-                with open(candidate_path, "rb") as f:
-                    file_bytes = f.read()
+    candidate_path = os.path.join(assets_dir, f"{animation_key}.tgs")
+    if os.path.exists(candidate_path):
+        try:
+            with open(candidate_path, "rb") as f:
+                file_bytes = f.read()
 
-                if ext == ".tgs":
-                    # Validate that the file is a valid GZIP compressed Lottie stream
-                    # If corrupted by text uploads (containing Unicode replacement characters), skip to avoid Telegram sending .unknown document
-                    try:
-                        gzip.decompress(file_bytes)
-                    except Exception as gz_err:
-                        logger.warning(
-                            f"Asset {filename} is not a valid gzip file ({gz_err}). "
-                            f"Skipping to prevent Telegram sending an unknown document. "
-                            f"Use a valid .tgs, .gif, .mp4, or Telegram Sticker File ID."
-                        )
-                        continue
+            input_file = InputFile(file_bytes, filename=f"{animation_key}.tgs")
+            await context.bot.send_sticker(chat_id=chat_id, sticker=input_file)
+            return True
+        except Exception as e:
+            logger.warning(f"Could not send .tgs sticker asset {candidate_path}: {e}")
+            return False
 
-                    input_file = InputFile(file_bytes, filename=f"{animation_key}.tgs")
-                    await context.bot.send_sticker(chat_id=chat_id, sticker=input_file)
-                elif ext in [".gif", ".mp4"]:
-                    input_file = InputFile(file_bytes, filename=filename)
-                    await context.bot.send_animation(chat_id=chat_id, animation=input_file)
-                elif ext in [".webp", ".png"]:
-                    input_file = InputFile(file_bytes, filename=filename)
-                    await context.bot.send_photo(chat_id=chat_id, photo=input_file)
-                return True
-            except Exception as e:
-                logger.warning(f"Could not send animation asset {candidate_path}: {e}")
-                return False
     return False
 
 
