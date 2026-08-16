@@ -47,8 +47,11 @@ FILTER_OPTIONS = [
     ("🎯 Same Major / Year", "filter_major"),
 ]
 
+# Telegram Sticker Pack Name (e.g. https://t.me/addstickers/FINDONEREAL)
+STICKER_SET_NAME = os.getenv("STICKER_SET_NAME", "FINDONEREAL").strip()
+
 # Optional Telegram Sticker File IDs (from Telegram animated sticker packs)
-# Users can set file_ids directly or send stickers to the bot to get their file_id
+# Users can set file_ids directly or the bot auto-fetches them from STICKER_SET_NAME
 STICKER_IDS = {
     "welcome": os.getenv("STICKER_WELCOME", ""),
     "search": os.getenv("STICKER_SEARCH", ""),

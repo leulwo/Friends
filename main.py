@@ -58,7 +58,8 @@ from config import (
     YEAR_OPTIONS,
     GENDER_OPTIONS,
     FILTER_OPTIONS,
-    STICKER_IDS
+    STICKER_IDS,
+    STICKER_SET_NAME
 )
 from database import DatabaseManager
 
@@ -837,6 +838,48 @@ def start_health_server():
 async def post_init(app: Application):
     """Runs after the bot instance is initialized."""
     await db.init_db()
+
+    # Automatically load stickers from Telegram Sticker Pack (e.g. FINDONEREAL)
+    if STICKER_SET_NAME:
+        try:
+            sticker_set = await app.bot.get_sticker_set(name=STICKER_SET_NAME)
+            logger.info(f"🎨 Found Telegram Sticker Pack '{STICKER_SET_NAME}' with {len(sticker_set.stickers)} stickers")
+            
+            # User's exact clock emoji & number mapping:
+            # 1 o'clock (🕐, 1) -> loading
+            # 2 o'clock (🕑, 2) -> match_found (Wave Animation)
+            # 3 o'clock (🕒, 3) -> car (carr.tgs)
+            # 4 o'clock (🕓, 4) -> bored_waiting (Loading Animation Bored Hand)
+            # 5 o'clock (🕔, 5) -> loading (loader animation)
+            # 6 o'clock (🕕, 6) -> search (search.tgs)
+            # 7 o'clock (🕖, 7) -> chat_start (Chat.tgs)
+            # 8 o'clock (🕗, 8) -> welcome (Welcome.tgs)
+            for idx, sticker in enumerate(sticker_set.stickers):
+                emoji = sticker.emoji or ""
+                logger.info(f"Sticker [{idx}]: emoji='{emoji}', file_id='{sticker.file_id[:16]}...'")
+
+                # Check clock emojis and digits
+                if "🕐" in emoji or "1️⃣" in emoji or emoji == "1" or idx == 0:
+                    STICKER_IDS["loading"] = sticker.file_id
+                if "🕑" in emoji or "2️⃣" in emoji or emoji == "2" or idx == 1:
+                    STICKER_IDS["match_found"] = sticker.file_id
+                if "🕒" in emoji or "3️⃣" in emoji or emoji == "3" or idx == 2:
+                    STICKER_IDS["car"] = sticker.file_id
+                if "🕓" in emoji or "4️⃣" in emoji or emoji == "4" or idx == 3:
+                    STICKER_IDS["bored_waiting"] = sticker.file_id
+                if "🕔" in emoji or "5️⃣" in emoji or emoji == "5" or idx == 4:
+                    STICKER_IDS["loading"] = sticker.file_id
+                if "🕕" in emoji or "6️⃣" in emoji or emoji == "6" or idx == 5:
+                    STICKER_IDS["search"] = sticker.file_id
+                if "🕖" in emoji or "7️⃣" in emoji or emoji == "7" or idx == 6:
+                    STICKER_IDS["chat_start"] = sticker.file_id
+                if "🕗" in emoji or "8️⃣" in emoji or emoji == "8" or idx == 7:
+                    STICKER_IDS["welcome"] = sticker.file_id
+
+            logger.info(f"Loaded STICKER_IDS mapping: {list(STICKER_IDS.keys())}")
+        except Exception as e:
+            logger.warning(f"Could not auto-fetch sticker set '{STICKER_SET_NAME}': {e}")
+
     logger.info("🏛️ Campus Stranger Bot initialized and ready to match students!")
 
 
