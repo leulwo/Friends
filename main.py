@@ -152,6 +152,15 @@ def auto_fade(chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE,
     asyncio.create_task(fade_out_message_after_delay(chat_id, message_id, context, delay_seconds))
 
 
+async def delete_user_message(update: Update):
+    """Deletes incoming user message (commands, answers, menu taps) so the chat stays completely clutter-free like a native app."""
+    if update and update.message:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # UI KEYBOARDS & HELPERS
 # ---------------------------------------------------------------------------
@@ -482,7 +491,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db_user = await db.get_user(user.id)
 
-    # Clean old transient messages
+    await delete_user_message(update)
     await cleanup_user_ui(user.id, context)
 
     # Trigger welcome animation sticker (auto-fades in 5s)
@@ -496,17 +505,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Let's set up your student profile (takes 20 seconds) 👇"
         )
         keyboard = [[InlineKeyboardButton("Create Student Profile", callback_data="start_onboarding")]]
-        sent = await update.message.reply_text(
-            welcome_text,
+        sent = await context.bot.send_message(
+            chat_id=user.id,
+            text=welcome_text,
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         track_ui_message(user.id, sent.message_id)
     else:
         name = db_user.get("full_name") or "Student"
-        sent = await update.message.reply_text(
-            f"Welcome back, <b>{name}</b>.\n\n"
-            f"What would you like to do today?",
+        sent = await context.bot.send_message(
+            chat_id=user.id,
+            text=f"Welcome back, <b>{name}</b>.\n\nWhat would you like to do today?",
             parse_mode="HTML",
             reply_markup=get_main_menu_keyboard()
         )
@@ -518,17 +528,22 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     db_user = await db.get_user(user_id)
 
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+
     if not db_user:
-        sent = await update.message.reply_text(
-            "Please complete your student profile first to find matches.",
+        sent = await context.bot.send_message(
+            chat_id=user_id,
+            text="Please complete your student profile first to find matches.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Setup Profile", callback_data="start_onboarding")]])
         )
         track_ui_message(user_id, sent.message_id)
         return
 
     if user_id in active_chats:
-        sent = await update.message.reply_text(
-            "You are currently in an active chat. Use /next to find someone else or /stop to end it.",
+        sent = await context.bot.send_message(
+            chat_id=user_id,
+            text="You are currently in an active chat. Use /next to find someone else or /stop to end it.",
             reply_markup=get_in_chat_keyboard()
         )
         track_ui_message(user_id, sent.message_id)
@@ -543,17 +558,17 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Find Campus Match at {UNIVERSITY_NAME}</b>\n\n"
         f"Select your match filter below or search anyone:"
     )
-    await cleanup_user_ui(user_id, context)
-    sent = await update.message.reply_text(text, parse_mode="HTML", reply_markup=get_filter_keyboard(current_filter))
+    sent = await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=get_filter_keyboard(current_filter))
     track_ui_message(user_id, sent.message_id)
 
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Skip to the next student candidate."""
     user_id = update.effective_user.id
+    await delete_user_message(update)
     if user_id in active_chats:
         await disconnect_chat(user_id, context, notify_partner=True, reason="Partner skipped to /next")
-        sent = await update.message.reply_text("<b>Skipped.</b> Finding a new student match...", parse_mode="HTML")
+        sent = await context.bot.send_message(chat_id=user_id, text="<b>Skipped.</b> Finding a new student match...", parse_mode="HTML")
         auto_fade(user_id, sent.message_id, context, delay_seconds=3.0)
         await search_and_display_candidate(user_id, context, filter_code="filter_any")
     else:
@@ -563,20 +578,23 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """End the current chat session."""
     user_id = update.effective_user.id
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
     if user_id in active_chats:
         await disconnect_chat(user_id, context, notify_partner=True, reason="Partner ended the chat")
-        sent = await update.message.reply_text("<b>Chat ended.</b>", parse_mode="HTML", reply_markup=get_main_menu_keyboard())
+        sent = await context.bot.send_message(chat_id=user_id, text="<b>Chat ended.</b>", parse_mode="HTML", reply_markup=get_main_menu_keyboard())
         track_ui_message(user_id, sent.message_id)
     else:
-        sent = await update.message.reply_text("You are not currently in any active chat.", reply_markup=get_main_menu_keyboard())
+        sent = await context.bot.send_message(chat_id=user_id, text="You are not currently in any active chat.", reply_markup=get_main_menu_keyboard())
         auto_fade(user_id, sent.message_id, context, delay_seconds=4.0)
 
 
 async def meet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Suggest random campus meetup spot and icebreaker."""
     user_id = update.effective_user.id
+    await delete_user_message(update)
     if user_id not in active_chats:
-        sent = await update.message.reply_text("Connect with a student first using /find.")
+        sent = await context.bot.send_message(chat_id=user_id, text="Connect with a student first using /find.")
         auto_fade(user_id, sent.message_id, context, delay_seconds=4.0)
         return
 
@@ -591,15 +609,16 @@ async def meet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<i>Want to meet there or grab coffee together? Send a message to your partner.</i>"
     )
 
-    await update.message.reply_text(text, parse_mode="HTML")
+    await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
     await context.bot.send_message(chat_id=partner_id, text=text, parse_mode="HTML")
 
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Report and permanently block inappropriate partner."""
     user_id = update.effective_user.id
+    await delete_user_message(update)
     if user_id not in active_chats:
-        sent = await update.message.reply_text("You can only report a user during an active chat.")
+        sent = await context.bot.send_message(chat_id=user_id, text="You can only report a user during an active chat.")
         auto_fade(user_id, sent.message_id, context, delay_seconds=4.0)
         return
 
@@ -610,8 +629,9 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await disconnect_chat(user_id, context, notify_partner=True, reason="Reported and blocked")
     await db.log_report(user_id, partner_id, "Inappropriate chat behavior report")
 
-    sent = await update.message.reply_text(
-        "<b>User reported and permanently blocked.</b> You will not be matched with them again.\n\nSearching for a new student...",
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text="<b>User reported and permanently blocked.</b> You will not be matched with them again.\n\nSearching for a new student...",
         parse_mode="HTML"
     )
     auto_fade(user_id, sent.message_id, context, delay_seconds=4.0)
@@ -621,16 +641,19 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show current user's profile with edit button."""
     user_id = update.effective_user.id
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+
     p = await db.get_user(user_id)
     if not p:
-        sent = await update.message.reply_text(
-            "No profile found. Let's create one.",
+        sent = await context.bot.send_message(
+            chat_id=user_id,
+            text="No profile found. Let's create one.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Create Profile", callback_data="start_onboarding")]])
         )
         track_ui_message(user_id, sent.message_id)
         return
 
-    await cleanup_user_ui(user_id, context)
     card = format_profile_card(p, is_self=True)
     keyboard = [
         [InlineKeyboardButton("✏️ Edit Profile", callback_data="start_onboarding")],
@@ -639,19 +662,21 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     photo_id = p.get("photo_id")
     if photo_id:
-        sent = await update.message.reply_photo(photo=photo_id, caption=card, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        sent = await context.bot.send_photo(chat_id=user_id, photo=photo_id, caption=card, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        sent = await update.message.reply_text(card, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        sent = await context.bot.send_message(chat_id=user_id, text=card, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     track_ui_message(user_id, sent.message_id)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show rules and help with back button to main menu."""
     user_id = update.effective_user.id
+    await delete_user_message(update)
     await cleanup_user_ui(user_id, context)
     keyboard = [[InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="back_to_main")]]
-    sent = await update.message.reply_text(
-        f"<b>{UNIVERSITY_NAME} Bot Rules & Help</b>\n\n"
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text=f"<b>{UNIVERSITY_NAME} Bot Rules & Help</b>\n\n"
         "1. <b>Respect:</b> Treat fellow students with kindness and respect.\n"
         "2. <b>Filter Match:</b> Choose your filters (Female, Male, Anyone) before searching.\n"
         "3. <b>Profile Preview:</b> Review student bios and handles before tapping [Start Chatting].\n"
@@ -682,27 +707,35 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Menu triggers
     if text in ["Find Campus Match", "🔍 Find Campus Match"]:
+        await delete_user_message(update)
         await find_command(update, context)
         return
     elif text in ["Gender & Filters", "🎯 Gender & Filters"]:
+        await delete_user_message(update)
         await find_command(update, context)
         return
     elif text in ["Next Match", "⏭️ Next Match"]:
+        await delete_user_message(update)
         await next_command(update, context)
         return
     elif text in ["End Chat", "🛑 End Chat"]:
+        await delete_user_message(update)
         await stop_command(update, context)
         return
     elif text in ["Suggest Campus Spot", "📍 Suggest Campus Spot"]:
+        await delete_user_message(update)
         await meet_command(update, context)
         return
     elif text in ["Report User", "🛡️ Report User"]:
+        await delete_user_message(update)
         await report_command(update, context)
         return
     elif text in ["My Profile", "👤 My Student Profile"]:
+        await delete_user_message(update)
         await profile_command(update, context)
         return
     elif text in ["Help & Rules", "❓ Help & Rules"]:
+        await delete_user_message(update)
         await help_command(update, context)
         return
 
@@ -755,180 +788,290 @@ async def relay_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ONBOARDING CONVERSATION FLOW (NAME -> AGE -> GENDER -> MAJOR -> YEAR -> DORM -> HOBBIES -> BIO -> PHOTO)
 # ---------------------------------------------------------------------------
 async def start_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     context.user_data["onboarding"] = {}
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+
     text = "<b>Step 1/9:</b> 👋 Welcome! What is your <b>First Name</b> or Nickname on campus?"
-    
     reply_markup = ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back to Main Menu"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
     
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.message.delete()
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode="HTML", reply_markup=reply_markup)
-    else:
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        try:
+            await update.callback_query.message.delete()
+        except Exception:
+            pass
+    
+    sent = await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=reply_markup)
+    track_ui_message(user_id, sent.message_id)
     return STATE_NAME
 
+
 async def back_to_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "<b>Step 1/9:</b> 👋 Welcome! What is your <b>First Name</b> or Nickname on campus?", 
+    user_id = update.effective_user.id
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text="<b>Step 1/9:</b> 👋 Welcome! What is your <b>First Name</b> or Nickname on campus?", 
         parse_mode="HTML", 
         reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back to Main Menu"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_NAME
 
+
 async def onboarding_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     context.user_data["onboarding"]["name"] = update.message.text.strip()
-    await update.message.reply_text(
-        "<b>Step 2/9:</b> What is your <b>Age</b>?",
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text="<b>Step 2/9:</b> What is your <b>Age</b>?",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_AGE
 
 
 async def back_to_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "<b>Step 2/9:</b> What is your <b>Age</b>?", 
+    user_id = update.effective_user.id
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text="<b>Step 2/9:</b> What is your <b>Age</b>?", 
         parse_mode="HTML", 
         reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_AGE
 
+
 async def onboarding_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     context.user_data["onboarding"]["age"] = update.message.text.strip()
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
     keyboard = [[KeyboardButton(g)] for g in GENDER_OPTIONS]
     keyboard.append([KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")])
-    await update.message.reply_text(
-        "<b>Step 3/9:</b> What is your <b>Gender</b>? (Used for match filtering)",
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text="<b>Step 3/9:</b> What is your <b>Gender</b>? (Used for match filtering)",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_GENDER
+
 
 async def back_to_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
     keyboard = [[KeyboardButton(g)] for g in GENDER_OPTIONS]
     keyboard.append([KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")])
-    await update.message.reply_text(
-        "<b>Step 3/9:</b> What is your <b>Gender</b>? (Used for match filtering)",
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text="<b>Step 3/9:</b> What is your <b>Gender</b>? (Used for match filtering)",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_GENDER
 
+
 async def onboarding_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     context.user_data["onboarding"]["gender"] = update.message.text.strip()
-    await update.message.reply_text(
-        "<b>Step 4/9:</b> What is your <b>Major / Department</b>? (e.g. Computer Science, Business, Biology, Medicine)",
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text="<b>Step 4/9:</b> What is your <b>Major / Department</b>? (e.g. Computer Science, Business, Biology, Medicine)",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_MAJOR
+
 
 async def back_to_major(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "<b>Step 4/9:</b> What is your <b>Major / Department</b>? (e.g. Computer Science, Business, Biology, Medicine)",
+    user_id = update.effective_user.id
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text="<b>Step 4/9:</b> What is your <b>Major / Department</b>? (e.g. Computer Science, Business, Biology, Medicine)",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_MAJOR
 
+
 async def onboarding_major(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     context.user_data["onboarding"]["major"] = update.message.text.strip()
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
     keyboard = [[KeyboardButton(y)] for y in YEAR_OPTIONS]
     keyboard.append([KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")])
-    await update.message.reply_text(
-        "<b>Step 5/9:</b> What is your <b>Academic Year</b>?",
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text="<b>Step 5/9:</b> What is your <b>Academic Year</b>?",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_YEAR
+
 
 async def back_to_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
     keyboard = [[KeyboardButton(y)] for y in YEAR_OPTIONS]
     keyboard.append([KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")])
-    await update.message.reply_text(
-        "<b>Step 5/9:</b> What is your <b>Academic Year</b>?",
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text="<b>Step 5/9:</b> What is your <b>Academic Year</b>?",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_YEAR
 
+
 async def onboarding_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     context.user_data["onboarding"]["year"] = update.message.text.strip()
-    await update.message.reply_text(
-        "<b>Step 6/9:</b> What is your <b>Campus / Dorm / Area</b>? (e.g. North Dorms, Off-Campus West, Engineering Quad)",
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text="<b>Step 6/9:</b> What is your <b>Campus / Dorm / Area</b>? (e.g. North Dorms, Off-Campus West, Engineering Quad)",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_DORM
+
 
 async def back_to_dorm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "<b>Step 6/9:</b> What is your <b>Campus / Dorm / Area</b>? (e.g. North Dorms, Off-Campus West, Engineering Quad)",
+    user_id = update.effective_user.id
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text="<b>Step 6/9:</b> What is your <b>Campus / Dorm / Area</b>? (e.g. North Dorms, Off-Campus West, Engineering Quad)",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_DORM
 
+
 async def onboarding_dorm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     context.user_data["onboarding"]["dorm"] = update.message.text.strip()
-    await update.message.reply_text(
-        "<b>Step 7/9:</b> Type 2 to 4 of your <b>Interests & Hobbies</b> separated by commas.\n\n"
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text="<b>Step 7/9:</b> Type 2 to 4 of your <b>Interests & Hobbies</b> separated by commas.\n\n"
         "<i>Examples: Coffee, Coding, Gaming, Gym, Anime, Music, Study Buddies</i>",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_INTERESTS
+
 
 async def back_to_interests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "<b>Step 7/9:</b> Type 2 to 4 of your <b>Interests & Hobbies</b> separated by commas.\n\n"
+    user_id = update.effective_user.id
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text="<b>Step 7/9:</b> Type 2 to 4 of your <b>Interests & Hobbies</b> separated by commas.\n\n"
         "<i>Examples: Coffee, Coding, Gaming, Gym, Anime, Music, Study Buddies</i>",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_INTERESTS
 
+
 async def onboarding_interests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     raw = update.message.text.strip()
     interests = [x.strip() for x in raw.split(",") if x.strip()]
     context.user_data["onboarding"]["interests"] = interests
-    await update.message.reply_text(
-        f"<b>Step 8/9:</b> Write a short <b>Bio</b> about yourself.\n\n"
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text=f"<b>Step 8/9:</b> Write a short <b>Bio</b> about yourself.\n\n"
         f"<i>Example: 'Hey! Excited to meet people around campus. Always down for coffee!'</i>",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_BIO
+
 
 async def back_to_bio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"<b>Step 8/9:</b> Write a short <b>Bio</b> about yourself.\n\n"
+    user_id = update.effective_user.id
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text=f"<b>Step 8/9:</b> Write a short <b>Bio</b> about yourself.\n\n"
         f"<i>Example: 'Hey! Excited to meet people around campus. Always down for coffee!'</i>",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_BIO
 
+
 async def onboarding_bio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     context.user_data["onboarding"]["bio"] = update.message.text.strip()
-    await update.message.reply_text(
-        f"<b>Step 9/9:</b> Upload a <b>Real Photo</b> of yourself!\n\n"
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+    sent = await context.bot.send_message(
+        chat_id=user_id,
+        text=f"<b>Step 9/9:</b> Upload a <b>Real Photo</b> of yourself!\n\n"
         f"This helps build trust and makes finding matches better.\n"
         f"(Send a photo, or type /skip to use no photo):",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
     )
+    track_ui_message(user_id, sent.message_id)
     return STATE_PHOTO
 
+
 async def onboarding_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     if update.message.photo:
         photo_id = update.message.photo[-1].file_id
         context.user_data["onboarding"]["photo_id"] = photo_id
     else:
         context.user_data["onboarding"]["photo_id"] = None
         if update.message.text and update.message.text.lower() != '/skip':
-             await update.message.reply_text("Please send a photo, or type /skip.", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True))
+             await delete_user_message(update)
+             await cleanup_user_ui(user_id, context)
+             sent = await context.bot.send_message(
+                 chat_id=user_id,
+                 text="Please send a photo, or type /skip.",
+                 reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
+             )
+             track_ui_message(user_id, sent.message_id)
              return STATE_PHOTO
              
     user = update.effective_user
@@ -939,19 +1082,29 @@ async def onboarding_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await db.save_user(data)
 
-    await send_asset_animation(user.id, "welcome", context)
+    await delete_user_message(update)
+    await cleanup_user_ui(user.id, context)
 
-    await update.message.reply_text(
-        f"<b>Profile Created Successfully</b>\n\n"
+    await send_asset_animation(user.id, "welcome", context, auto_delete_seconds=4.0)
+
+    sent = await context.bot.send_message(
+        chat_id=user.id,
+        text=f"<b>Profile Created Successfully</b>\n\n"
         f"You are all set to find new friends across {UNIVERSITY_NAME}.\n"
         f"Tap <b>Find Campus Match</b> below to choose filters and start matching.",
         parse_mode="HTML",
         reply_markup=get_main_menu_keyboard()
     )
+    track_ui_message(user.id, sent.message_id)
     return ConversationHandler.END
 
+
 async def cancel_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Profile setup cancelled.", reply_markup=get_main_menu_keyboard())
+    user_id = update.effective_user.id
+    await delete_user_message(update)
+    await cleanup_user_ui(user_id, context)
+    sent = await context.bot.send_message(chat_id=user_id, text="Profile setup cancelled.", reply_markup=get_main_menu_keyboard())
+    track_ui_message(user_id, sent.message_id)
     return ConversationHandler.END
 
 
