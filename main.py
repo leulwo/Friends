@@ -108,6 +108,147 @@ ui_messages: Dict[int, List[int]] = {}
 
 
 # ---------------------------------------------------------------------------
+# BUILT-IN HTTP HEALTH CHECK & KEEP-ALIVE SERVER (FOR RENDER & CLOUD 24/7)
+# ---------------------------------------------------------------------------
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """HTTP Request Handler to satisfy Render/Cloud port scans and uptime monitors."""
+    
+    def log_message(self, format, *args):
+        # Silence routine health-check polling logs to avoid console clutter
+        pass
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "application/json")
+        self.end_headers()
+
+    def do_GET(self):
+        if self.path in ["/health", "/healthz", "/ping"]:
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            payload = f'{{"status":"healthy","uptime":"ok","active_chats":{len(active_chats)},"queue":{len(waiting_queue)},"university":"{UNIVERSITY_NAME}"}}'
+            self.wfile.write(payload.encode("utf-8"))
+            return
+
+        # Main Web Status & Keep-Alive Dashboard
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
+
+        token_status = "🟢 Active & Configured" if BOT_TOKEN else "🔴 Missing TELEGRAM_BOT_TOKEN"
+        db_status = "🟢 Connected" if DATABASE_URL else "🟡 SQLite (Local)"
+        
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{UNIVERSITY_NAME} Bot - Status & Keep-Alive</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }}
+        body {{ background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }}
+        .card {{ background: #1e293b; border: 1px solid #334155; border-radius: 16px; max-width: 540px; width: 100%; padding: 32px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5); }}
+        .badge {{ display: inline-block; padding: 4px 12px; background: rgba(34, 197, 94, 0.15); border: 1px solid #22c55e; color: #4ade80; border-radius: 9999px; font-size: 13px; font-weight: 600; margin-bottom: 16px; }}
+        h1 {{ font-size: 24px; font-weight: 700; margin-bottom: 8px; color: #ffffff; }}
+        p.subtitle {{ color: #94a3b8; font-size: 14px; margin-bottom: 24px; }}
+        .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 24px; }}
+        .stat-box {{ background: #0f172a; border: 1px solid #334155; border-radius: 12px; padding: 14px; }}
+        .stat-label {{ font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }}
+        .stat-value {{ font-size: 16px; font-weight: 600; color: #f1f5f9; }}
+        .info-box {{ background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 12px; padding: 16px; margin-bottom: 24px; font-size: 13px; line-height: 1.6; color: #93c5fd; }}
+        .info-box strong {{ color: #ffffff; }}
+        .btn {{ display: block; width: 100%; text-align: center; background: #2563eb; color: #ffffff; text-decoration: none; padding: 14px; border-radius: 10px; font-weight: 600; font-size: 15px; transition: background 0.2s; }}
+        .btn:hover {{ background: #1d4ed8; }}
+        .footer {{ text-align: center; margin-top: 18px; font-size: 12px; color: #64748b; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <span class="badge">● Web Service Online</span>
+        <h1>{UNIVERSITY_NAME} Telegram Bot</h1>
+        <p class="subtitle">Campus Anonymous Chat & Student Matcher backend service.</p>
+        
+        <div class="grid">
+            <div class="stat-box">
+                <div class="stat-label">Bot Engine</div>
+                <div class="stat-value">{token_status}</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Database</div>
+                <div class="stat-value">{db_status}</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Active Chats</div>
+                <div class="stat-value">{len(active_chats)} conversations</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Waiting Queue</div>
+                <div class="stat-value">{len(waiting_queue)} students</div>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <strong>⚡ 24/7 Render Keep-Alive:</strong><br>
+            Render free-tier spins down after 15 min of no HTTP traffic. To keep your bot awake 24/7, set up a free 5-minute ping on <a href="https://cron-job.org" target="_blank" style="color: #60a5fa; text-decoration: underline;">Cron-job.org</a> or <a href="https://uptimerobot.com" target="_blank" style="color: #60a5fa; text-decoration: underline;">UptimeRobot</a> pointing to this URL (<code>/health</code>).
+        </div>
+
+        <a href="https://t.me" class="btn" target="_blank">Open Telegram Bot</a>
+        <div class="footer">Health Endpoint: <code>/health</code> (HTTP 200 OK)</div>
+    </div>
+</body>
+</html>"""
+        self.wfile.write(html.encode("utf-8"))
+
+
+def run_http_server(port: int = 3000):
+    """Starts the lightweight HTTP health server in a dedicated background daemon thread."""
+    server_address = ("0.0.0.0", port)
+    try:
+        httpd = HTTPServer(server_address, HealthCheckHandler)
+        logger.info(f"🌐 HTTP Health & Keep-Alive server listening on port {port} (0.0.0.0:{port})")
+        httpd.serve_forever()
+    except Exception as e:
+        logger.error(f"Failed to start HTTP server on port {port}: {e}")
+
+
+def start_background_http_server():
+    """Reads PORT from environment (defaulting to Render's 10000 or Cloud 3000) and launches server."""
+    port_str = os.getenv("PORT", "3000")
+    try:
+        port = int(port_str)
+    except ValueError:
+        port = 3000
+    
+    server_thread = threading.Thread(target=run_http_server, args=(port,), daemon=True)
+    server_thread.start()
+    return server_thread
+
+
+async def keep_alive_self_ping():
+    """Background async worker to self-ping external URL every 10 minutes if configured."""
+    import aiohttp
+    
+    target_url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("APP_URL") or os.getenv("WEB_APP_URL")
+    if not target_url:
+        return
+    
+    ping_url = f"{target_url.rstrip('/')}/health"
+    logger.info(f"🔄 Automated Keep-Alive self-ping enabled for {ping_url}")
+    
+    while True:
+        await asyncio.sleep(600)  # Ping every 10 minutes
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(ping_url, timeout=15) as resp:
+                    if resp.status == 200:
+                        logger.debug("Keep-alive self-ping successful (200 OK)")
+        except Exception as e:
+            logger.debug(f"Keep-alive self-ping non-fatal error: {e}")
+
+
+# ---------------------------------------------------------------------------
 # SELF-CLEANING & TRANSIENT UI HELPERS (APPEAR & FADE OUT)
 # ---------------------------------------------------------------------------
 def track_ui_message(user_id: int, message_id: int):
@@ -1311,21 +1452,26 @@ async def post_init(app: Application):
         except Exception as e:
             logger.warning(f"Could not auto-fetch sticker set '{STICKER_SET_NAME}': {e}")
 
+    # Start automated keep-alive self-ping task in the background
+    asyncio.create_task(keep_alive_self_ping())
+
     logger.info("🏛️ Campus Stranger Bot initialized and ready to match students!")
 
 
 def main():
     import time
-    """Start the bot."""
-    start_health_server()
+    """Start the bot and the HTTP health check server."""
+    # Start the HTTP server to satisfy Render/Cloud port checks and uptime monitors
+    start_background_http_server()
+
     if not BOT_TOKEN or BOT_TOKEN == "mock":
-        print("❌ ERROR: TELEGRAM_BOT_TOKEN environment variable is not set!")
-        print("Please export TELEGRAM_BOT_TOKEN='your_token_from_botfather' in .env or your host.")
-        print("Sleeping to keep the server alive so you can fix the token...")
+        logger.error("❌ TELEGRAM_BOT_TOKEN environment variable is not set!")
+        logger.info("Please set TELEGRAM_BOT_TOKEN in your environment or .env file.")
+        logger.info("🌐 Web health check server is running to prevent container shutdown.")
         while True:
             time.sleep(60)
 
-    # Build Application# Build Application
+    # Build Application
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Onboarding Conversation
