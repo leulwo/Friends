@@ -1,10 +1,11 @@
 services:
-  # Free tier compatible Web Service on Render (with integrated health check)
+  # Free tier compatible Web Service on Render (with integrated health check & keep-alive)
   - type: web
     name: campus-stranger-telegram-bot
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
+    healthCheckPath: /health
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
