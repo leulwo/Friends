@@ -237,8 +237,8 @@ class DatabaseManager:
             conn.commit()
             conn.close()
 
-    async def find_candidates(self, user_id: int, gender_filter: str = "Any", exclude_ids: Optional[Set[int]] = None, current_user_profile: dict = None) -> List[dict]:
-        """Find candidate student profiles matching the chosen filter."""
+    async def find_candidates(self, user_id: int, filter_type: str = "filter_any", exclude_ids: Optional[Set[int]] = None, current_user_profile: dict = None) -> List[dict]:
+        """Find candidate student profiles matching the chosen filter and prioritized by traits."""
         exclude_list = list(exclude_ids or set())
         if user_id not in exclude_list:
             exclude_list.append(user_id)
@@ -246,23 +246,33 @@ class DatabaseManager:
         rows = []
         if self.is_postgres and self.pg_pool:
             async with self.pg_pool.acquire() as conn:
-                if gender_filter and gender_filter not in ("Any", "Anyone", "All"):
+                if filter_type == "filter_female":
                     query = """
                         SELECT * FROM students 
                         WHERE is_banned = FALSE 
                           AND user_id != ALL($1) 
-                          AND gender ILIKE $2
-                        ORDER BY total_chats ASC, RANDOM()
-                        LIMIT 50
+                          AND gender ILIKE '%female%'
+                        ORDER BY last_active DESC NULLS LAST, RANDOM()
+                        LIMIT 150
                     """
-                    records = await conn.fetch(query, exclude_list, f"%{gender_filter}%")
+                    records = await conn.fetch(query, exclude_list)
+                elif filter_type == "filter_male":
+                    query = """
+                        SELECT * FROM students 
+                        WHERE is_banned = FALSE 
+                          AND user_id != ALL($1) 
+                          AND gender ILIKE '%male%' AND gender NOT ILIKE '%female%'
+                        ORDER BY last_active DESC NULLS LAST, RANDOM()
+                        LIMIT 150
+                    """
+                    records = await conn.fetch(query, exclude_list)
                 else:
                     query = """
                         SELECT * FROM students 
                         WHERE is_banned = FALSE 
                           AND user_id != ALL($1)
-                        ORDER BY total_chats ASC, RANDOM()
-                        LIMIT 50
+                        ORDER BY last_active DESC NULLS LAST, RANDOM()
+                        LIMIT 150
                     """
                     records = await conn.fetch(query, exclude_list)
                 rows = [dict(r) for r in records]
@@ -272,24 +282,33 @@ class DatabaseManager:
             cur = conn.cursor()
             placeholders = ",".join(["?"] * len(exclude_list))
             
-            if gender_filter and gender_filter not in ("Any", "Anyone", "All"):
+            if filter_type == "filter_female":
                 query = f"""
                     SELECT * FROM students 
                     WHERE is_banned = 0 
                       AND user_id NOT IN ({placeholders})
-                      AND gender LIKE ?
-                    ORDER BY total_chats ASC, RANDOM()
-                    LIMIT 50
+                      AND gender LIKE '%female%'
+                    ORDER BY last_active DESC, RANDOM()
+                    LIMIT 150
                 """
-                params = list(exclude_list) + [f"%{gender_filter}%"]
-                cur.execute(query, params)
+                cur.execute(query, exclude_list)
+            elif filter_type == "filter_male":
+                query = f"""
+                    SELECT * FROM students 
+                    WHERE is_banned = 0 
+                      AND user_id NOT IN ({placeholders})
+                      AND gender LIKE '%male%' AND gender NOT LIKE '%female%'
+                    ORDER BY last_active DESC, RANDOM()
+                    LIMIT 150
+                """
+                cur.execute(query, exclude_list)
             else:
                 query = f"""
                     SELECT * FROM students 
                     WHERE is_banned = 0 
                       AND user_id NOT IN ({placeholders})
-                    ORDER BY total_chats ASC, RANDOM()
-                    LIMIT 50
+                    ORDER BY last_active DESC, RANDOM()
+                    LIMIT 150
                 """
                 cur.execute(query, exclude_list)
             records = cur.fetchall()
@@ -299,30 +318,75 @@ class DatabaseManager:
         
         # Advanced Matching Algorithm: Score and Sort Candidates
         if current_user_profile and rows:
+            import re
+            from datetime import datetime, timezone
+            
             my_major = current_user_profile.get("major", "")
             my_year = current_user_profile.get("study_year", "")
             my_dorm = current_user_profile.get("dorm", "")
             my_interests_str = current_user_profile.get("interests", "")
             my_interests = set([i.strip().lower() for i in my_interests_str.split(",") if i.strip()])
+            my_age_str = current_user_profile.get("age", "")
+            my_age = int(re.sub(r'\D', '', my_age_str)) if re.sub(r'\D', '', my_age_str) else None
             
             for row in rows:
                 score = 0
+                
+                # Online availability (+5 points if active in the last 24h)
+                # Since we ordered by last_active DESC, they're already quite relevant.
+                last_active = row.get("last_active")
+                if last_active:
+                    try:
+                        if isinstance(last_active, str):
+                            la_dt = datetime.strptime(last_active.split('.')[0], "%Y-%m-%d %H:%M:%S")
+                        else:
+                            la_dt = last_active
+                        if la_dt.tzinfo is None:
+                            la_dt = la_dt.replace(tzinfo=timezone.utc)
+                        now_dt = datetime.now(timezone.utc)
+                        hours_diff = (now_dt - la_dt).total_seconds() / 3600
+                        if hours_diff <= 24:
+                            score += 5
+                        if hours_diff <= 1:
+                            score += 5
+                    except Exception:
+                        pass
+                
                 # Same Major (+3 points)
                 if row.get("major") == my_major and my_major and my_major != "Undeclared":
                     score += 3
+                    if filter_type == "filter_major":
+                        score += 20
+                        
                 # Same Year (+1 point)
                 if row.get("study_year") == my_year and my_year:
                     score += 1
+                    if filter_type == "filter_major":
+                        score += 20
+                        
                 # Same Dorm (+1 point)
                 if row.get("dorm") == my_dorm and my_dorm:
                     score += 1
-                # Shared Interests (+2 points per match)
+                    
+                # Shared Interests (+3 points per match)
                 their_interests_str = row.get("interests", "")
                 their_interests = set([i.strip().lower() for i in their_interests_str.split(",") if i.strip()])
                 common = my_interests.intersection(their_interests)
-                score += len(common) * 2
+                score += len(common) * 3
+                if filter_type == "filter_interests" and len(common) > 0:
+                    score += len(common) * 15
                 
-                # Active recently bonus could go here (relying on DB sort for now)
+                # Similar Age (+3 points)
+                their_age_str = row.get("age", "")
+                their_age = int(re.sub(r'\D', '', their_age_str)) if re.sub(r'\D', '', their_age_str) else None
+                if my_age and their_age and abs(my_age - their_age) <= 2:
+                    score += 3
+                    if filter_type == "filter_age":
+                        score += 20
+                elif my_age_str and my_age_str == their_age_str:
+                    score += 2
+                    if filter_type == "filter_age":
+                        score += 20
                 
                 row['match_score'] = score
                 

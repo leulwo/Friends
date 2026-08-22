@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS students (
     interests TEXT DEFAULT '',
     bio TEXT DEFAULT '',
     social_handle TEXT,
+    age TEXT DEFAULT 'Not specified',
+    photo_id TEXT,
     is_banned BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     total_chats INT DEFAULT 0

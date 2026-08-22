@@ -48,6 +48,8 @@ FILTER_OPTIONS = [
     ("Female Students", "filter_female"),
     ("Male Students", "filter_male"),
     ("Same Major / Year", "filter_major"),
+    ("Similar Age", "filter_age"),
+    ("Shared Interests", "filter_interests"),
 ]
 
 # Telegram Sticker Pack Name (e.g. https://t.me/addstickers/FINDONEREAL)

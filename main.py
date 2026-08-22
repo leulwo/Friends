@@ -455,13 +455,6 @@ async def search_and_display_candidate(user_id: int, context: ContextTypes.DEFAU
         )
         return
 
-    # Determine gender keyword for query
-    gender_filter = "Any"
-    if filter_code == "filter_female":
-        gender_filter = "Female"
-    elif filter_code == "filter_male":
-        gender_filter = "Male"
-
     # Get list of excluded IDs (self + blocked + already viewed this session)
     seen = viewed_candidates.setdefault(user_id, set())
     user_blocks = blocked_pairs.get(user_id, set())
@@ -469,17 +462,19 @@ async def search_and_display_candidate(user_id: int, context: ContextTypes.DEFAU
 
     # Fetch candidates matching filter
     current_user = await db.get_user(user_id)
-    candidates = await db.find_candidates(user_id, gender_filter=gender_filter, exclude_ids=exclude_ids, current_user_profile=current_user)
+    candidates = await db.find_candidates(user_id, filter_type=filter_code, exclude_ids=exclude_ids, current_user_profile=current_user)
 
     # If all candidates seen, reset session cache to allow cycling through again
     if not candidates and len(seen) > 0:
         viewed_candidates[user_id] = set()
         exclude_ids = user_blocks.union({user_id})
         current_user = await db.get_user(user_id)
-    candidates = await db.find_candidates(user_id, gender_filter=gender_filter, exclude_ids=exclude_ids, current_user_profile=current_user)
+        candidates = await db.find_candidates(user_id, filter_type=filter_code, exclude_ids=exclude_ids, current_user_profile=current_user)
 
     if not candidates:
-        filter_label = "Female" if filter_code == "filter_female" else ("Male" if filter_code == "filter_male" else "any")
+        filter_label = filter_code.replace("filter_", "").capitalize()
+        if filter_label == "Any":
+            filter_label = "any"
         text = (
             f"<b>No other {filter_label} students found at this exact moment.</b>\n\n"
             f"Would you like to search with broader filters or try again?"
@@ -1189,7 +1184,7 @@ async def onboarding_bio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id=user_id,
         text=f"<b>Step 9/9:</b> Upload a <b>Real Photo</b> of yourself!\n\n"
         f"This helps build trust and makes finding matches better.\n"
-        f"(Send a photo, or type /skip to use no photo):",
+        f"(Please send a photo):",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
     )
@@ -1203,17 +1198,15 @@ async def onboarding_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_id = update.message.photo[-1].file_id
         context.user_data["onboarding"]["photo_id"] = photo_id
     else:
-        context.user_data["onboarding"]["photo_id"] = None
-        if update.message.text and update.message.text.lower() != '/skip':
-             await delete_user_message(update)
-             await cleanup_user_ui(user_id, context)
-             sent = await context.bot.send_message(
-                 chat_id=user_id,
-                 text="Please send a photo, or type /skip.",
-                 reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
-             )
-             track_ui_message(user_id, sent.message_id)
-             return STATE_PHOTO
+        await delete_user_message(update)
+        await cleanup_user_ui(user_id, context)
+        sent = await context.bot.send_message(
+            chat_id=user_id,
+            text="Please send a real photo to complete your profile.",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back"), KeyboardButton("❌ Cancel Setup")]], resize_keyboard=True)
+        )
+        track_ui_message(user_id, sent.message_id)
+        return STATE_PHOTO
              
     user = update.effective_user
     data = context.user_data["onboarding"]
